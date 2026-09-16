@@ -66,6 +66,7 @@ app.post("/api/chat", async (req, res) => {
 
     const data = await response.json();
     const reply = data.content?.[0]?.text || "Elnézést, nem sikerült választ generálni.";
+    if (!data.content) console.error("Anthropic API error response:", JSON.stringify(data));
 
     // Egyszerű lead-jelzés: ha a beszélgetésben szerepel email cím, értesítünk
     const fullText = messages.map((m) => m.content).join(" ") + " " + reply;
