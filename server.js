@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
 
 dotenv.config();
 const app = express();
@@ -17,13 +16,6 @@ app.use(
   })
 );
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.GMAIL_EMAIL,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
 
 // A rendszerprompt — ugyanaz a szöveg, amit a Chatbase Instructions mezőjébe is feltöltöttünk
 const SYSTEM_PROMPT = `### Szerep
@@ -84,12 +76,23 @@ app.post("/api/chat", async (req, res) => {
 
 async function notifyLead(conversationText, leadEmail) {
   try {
-    await transporter.sendMail({
-      from: process.env.GMAIL_EMAIL,
-      to: process.env.GMAIL_EMAIL,
-      subject: `Új lead a chatbotból (${leadEmail})`,
-      text: `A chatbot beszélgetésben egy email cím szerepelt: ${leadEmail}\n\nBeszélgetés részlete:\n${conversationText}`,
+    const res = await fetch("https://api.resend.com/emails", {
+              method: "POST",
+              headers: {
+                          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+                          "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                          from: "KlementForge Chatbot <onboarding@resend.dev>",
+                          to: process.env.GMAIL_EMAIL,
+                          subject: `Új lead a chatbotból (${leadEmail})`,
+                          text: `A chatbot beszélgetésben egy email cím szerepelt: ${leadEmail}\n\nBeszélgetés részlete:\n${conversationText}`,
+              }),
     });
+          if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(`Resend API error: ${errText}`);
+          }
     console.log("✓ Lead notification email sent for", leadEmail);
   } catch (err) {
     console.error("✗ Lead notification failed:", err.message);
