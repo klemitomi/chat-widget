@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
+import demoRoutes from "./demo-routes.js";
 
 dotenv.config();
 const app = express();
@@ -16,6 +17,7 @@ app.use(
     origin: allowedOrigins,
   })
 );
+app.use("/api", demoRoutes);
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
