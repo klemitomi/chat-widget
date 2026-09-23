@@ -12,7 +12,7 @@ import express from "express";
 import { TOOLS, clip } from "./demo-prompts.js";
 
 const router = express.Router();
-const MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 // Egyszerű, függőség nélküli limitálás IP-nként + napi plafon (költségvédelem)
 const hits = new Map();
@@ -56,7 +56,7 @@ router.post("/demo", limit(20, 10 * 60 * 1000), dailyCap, async (req, res) => {
         "x-api-key": process.env.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: MODEL, max_tokens: tool.max, system: tool.system, messages: tool.messages(req.body.input || {}) }),
+      body: JSON.stringify({ model: tool.model || DEFAULT_MODEL, max_tokens: tool.max, system: tool.system, messages: tool.messages(req.body.input || {}) }),
     });
     const data = await r.json();
     if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
