@@ -106,4 +106,47 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
   }
 });
 
+// ---- Prémium magyar hang (ElevenLabs) ----
+// Környezeti változók: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+// Opcionális: ELEVENLABS_MODEL (alapból eleven_turbo_v2_5), TTS_DAILY_CHARS (alapból 20000)
+// Ha nincs kulcs, 503-at ad, és a weboldal automatikusan a böngésző hangjára vált.
+const ttsCache = new Map(); // ugyanaz a mondat (köszönés, minta hívás) nem fogyaszt újra kreditet
+let ttsDaily = { day: new Date().toDateString(), chars: 0 };
+
+router.post("/tts", limit(40, 10 * 60 * 1000), async (req, res) => {
+  const key = process.env.ELEVENLABS_API_KEY, voice = process.env.ELEVENLABS_VOICE_ID;
+  if (!key || !voice) return res.status(503).json({ error: "tts_disabled" });
+  const text = clip(req.body?.text, 400).trim();
+  if (!text) return res.status(400).json({ error: "empty" });
+
+  const cached = ttsCache.get(text);
+  if (cached) return res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "public, max-age=86400" }).send(cached);
+
+  const today = new Date().toDateString();
+  if (ttsDaily.day !== today) ttsDaily = { day: today, chars: 0 };
+  if (ttsDaily.chars + text.length > Number(process.env.TTS_DAILY_CHARS || 20000)) return res.status(429).json({ error: "tts_daily_limit" });
+
+  try {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}?output_format=mp3_44100_64`, {
+      method: "POST",
+      headers: { "xi-api-key": key, "Content-Type": "application/json", Accept: "audio/mpeg" },
+      body: JSON.stringify({
+        text,
+        model_id: process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5",
+        language_code: "hu",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true },
+      }),
+    });
+    if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    const buf = Buffer.from(await r.arrayBuffer());
+    ttsDaily.chars += text.length;
+    if (ttsCache.size > 300) ttsCache.delete(ttsCache.keys().next().value);
+    ttsCache.set(text, buf);
+    res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "public, max-age=86400" }).send(buf);
+  } catch (e) {
+    console.error("tts error", e.message);
+    res.status(502).json({ error: "tts_unavailable" });
+  }
+});
+
 export default router;
