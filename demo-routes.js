@@ -106,43 +106,76 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
   }
 });
 
-// ---- Prémium magyar hang (ElevenLabs) ----
-// Környezeti változók: ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
-// Opcionális: ELEVENLABS_MODEL (alapból eleven_turbo_v2_5), TTS_DAILY_CHARS (alapból 20000)
-// Ha nincs kulcs, 503-at ad, és a weboldal automatikusan a böngésző hangjára vált.
-const ttsCache = new Map(); // ugyanaz a mondat (köszönés, minta hívás) nem fogyaszt újra kreditet
+// ---- Természetes magyar hang: Microsoft Azure (Noémi) vagy ElevenLabs ----
+// Azure (ingyenes F0 keret): AZURE_SPEECH_KEY, AZURE_SPEECH_REGION (pl. westeurope)
+//   opcionális: AZURE_VOICE (alapból hu-HU-NoemiNeural; férfihang: hu-HU-TamasNeural)
+// ElevenLabs (fizetős csomaggal): ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, opcionális ELEVENLABS_MODEL
+// Ha mindkettő be van állítva, az ElevenLabs az elsődleges. Ha egyik sincs, 503 jön,
+// és a weboldal azonnal a böngésző hangjára vált.
+// Opcionális: TTS_DAILY_CHARS (napi karakterplafon, alapból 20000)
+const ttsCache = new Map(); // ugyanaz a mondat (köszönés, minta hívás) nem fogyaszt újra keretet
 let ttsDaily = { day: new Date().toDateString(), chars: 0 };
+const xmlEsc = (s) => s.replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));
+
+async function ttsElevenLabs(text) {
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(process.env.ELEVENLABS_VOICE_ID)}?output_format=mp3_44100_64`, {
+    method: "POST",
+    headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY, "Content-Type": "application/json", Accept: "audio/mpeg" },
+    body: JSON.stringify({
+      text,
+      model_id: process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5",
+      language_code: "hu",
+      voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true },
+    }),
+  });
+  if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+async function ttsAzure(text) {
+  const region = process.env.AZURE_SPEECH_REGION || "westeurope";
+  const voice = process.env.AZURE_VOICE || "hu-HU-NoemiNeural";
+  const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="hu-HU"><voice name="${voice}"><prosody rate="0%">${xmlEsc(text)}</prosody></voice></speak>`;
+  const r = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+    method: "POST",
+    headers: {
+      "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
+      "Content-Type": "application/ssml+xml",
+      "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+      "User-Agent": "klementforge-demo",
+    },
+    body: ssml,
+  });
+  if (!r.ok) throw new Error(`Azure ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+function ttsProvider() {
+  if (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID) return ttsElevenLabs;
+  if (process.env.AZURE_SPEECH_KEY) return ttsAzure;
+  return null;
+}
 
 router.post("/tts", limit(40, 10 * 60 * 1000), async (req, res) => {
-  const key = process.env.ELEVENLABS_API_KEY, voice = process.env.ELEVENLABS_VOICE_ID;
-  if (!key || !voice) return res.status(503).json({ error: "tts_disabled" });
+  const provider = ttsProvider();
+  if (!provider) return res.status(503).json({ error: "tts_disabled" });
   const text = clip(req.body?.text, 400).trim();
   if (!text) return res.status(400).json({ error: "empty" });
 
+  const send = (buf) => res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "public, max-age=86400" }).send(buf);
   const cached = ttsCache.get(text);
-  if (cached) return res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "public, max-age=86400" }).send(cached);
+  if (cached) return send(cached);
 
   const today = new Date().toDateString();
   if (ttsDaily.day !== today) ttsDaily = { day: today, chars: 0 };
   if (ttsDaily.chars + text.length > Number(process.env.TTS_DAILY_CHARS || 20000)) return res.status(429).json({ error: "tts_daily_limit" });
 
   try {
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}?output_format=mp3_44100_64`, {
-      method: "POST",
-      headers: { "xi-api-key": key, "Content-Type": "application/json", Accept: "audio/mpeg" },
-      body: JSON.stringify({
-        text,
-        model_id: process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5",
-        language_code: "hu",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true },
-      }),
-    });
-    if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    const buf = Buffer.from(await r.arrayBuffer());
+    const buf = await provider(text);
     ttsDaily.chars += text.length;
     if (ttsCache.size > 300) ttsCache.delete(ttsCache.keys().next().value);
     ttsCache.set(text, buf);
-    res.set({ "Content-Type": "audio/mpeg", "Cache-Control": "public, max-age=86400" }).send(buf);
+    send(buf);
   } catch (e) {
     console.error("tts error", e.message);
     res.status(502).json({ error: "tts_unavailable" });
