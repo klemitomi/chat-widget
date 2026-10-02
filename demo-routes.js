@@ -63,7 +63,15 @@ router.post("/demo", limit(20, 10 * 60 * 1000), dailyCap, async (req, res) => {
     const text = data.content.filter((c) => c.type === "text").map((c) => c.text).join("");
     let result;
     try { result = parseJson(text); }
-    catch { throw new Error(`bad_json (stop: ${data.stop_reason}): ${text.slice(0, 200)}`); }
+    catch {
+      // Telefonos demónál a sima szöveges válasz is használható, ne szakadjon meg a hívás
+      if (req.body.tool === "phone" && text.trim()) {
+        console.warn("demo phone: plain-text reply, wrapped");
+        result = { reply: text.trim().slice(0, 600), fields: {}, done: false };
+      } else {
+        throw new Error(`bad_json (stop: ${data.stop_reason}): ${text.slice(0, 200)}`);
+      }
+    }
     res.json({ result });
   } catch (e) {
     console.error("demo error", req.body?.tool, e.message);

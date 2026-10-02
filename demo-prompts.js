@@ -27,7 +27,13 @@ ${HU_STYLE}`,
       const turns = Array.isArray(i.turns) ? i.turns.slice(-16) : [];
       const m = turns
         .filter((t) => t && (t.role === "user" || t.role === "assistant"))
-        .map((t) => ({ role: t.role, content: clip(t.content, 400) || "…" }));
+        // A korábbi AI-válaszokat JSON-ként adjuk vissza, hogy a modell is JSON-ban folytassa
+        .map((t) => ({
+          role: t.role,
+          content: t.role === "assistant"
+            ? JSON.stringify({ reply: clip(t.content, 400) || "…" })
+            : clip(t.content, 400) || "…",
+        }));
       while (m.length && m[0].role !== "user") m.shift();
       return m.length ? m : [{ role: "user", content: "Halló?" }];
     },
