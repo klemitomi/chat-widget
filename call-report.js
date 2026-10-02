@@ -26,6 +26,31 @@ function fmtTime(iso) {
   } catch { return String(iso); }
 }
 
+async function analyzeTranscript(transcript) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 600,
+      system: `Egy telefonhívás átiratát kapod (AI asszisztens és egy hívó beszélgetése Klement Tamás vállalkozása, a KlementForge nevében).
+Válaszolj CSAK egy JSON objektummal, magyarul:
+{"summary": "2-3 mondatos összefoglaló Tamásnak címezve: ki hívott, mit szeretne, mi a teendő",
+ "name": string|null, "phone": string|null, "company": string|null, "request": string|null,
+ "appointment": "lefoglalt időpont, pl. 2026. október 6. hétfő 14:00" | null, "channel": "telefon"|"online"|null, "email": string|null}
+Ami nem hangzott el, legyen null.`,
+      messages: [{ role: "user", content: transcript.slice(0, 30000) }],
+    }),
+  });
+  const d = await r.json();
+  const text = (d.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  const a = text.indexOf("{"), b = text.lastIndexOf("}");
+  if (a < 0 || b <= a) throw new Error("no json: " + text.slice(0, 120));
+  const obj = JSON.parse(text.slice(a, b + 1));
+  for (const k of Object.keys(obj)) if (obj[k] === null || obj[k] === "") delete obj[k];
+  return obj;
+}
+
 router.post("/call-report", async (req, res) => {
   // Csak a Vapitól fogadunk el jelentést
   const secret = process.env.VAPI_SECRET;
@@ -38,10 +63,16 @@ router.post("/call-report", async (req, res) => {
 
   try {
     const call = m.call || {};
-    const caller = call.customer?.number || m.customer?.number || "ismeretlen szám";
-    const summary = m.analysis?.summary || m.summary || "Nincs összefoglaló.";
-    const data = m.analysis?.structuredData || {};
+    const caller = call.customer?.number || m.customer?.number || "ismeretlen szám (webes teszthívás)";
     const transcript = m.artifact?.transcript || m.transcript || "";
+    let summary = m.analysis?.summary || m.summary || "";
+    let data = m.analysis?.structuredData || {};
+    // Ha a Vapi nem küldött összefoglalót / adatokat, Claude készíti el az átiratból
+    if ((!summary || !Object.keys(data).length) && transcript) {
+      const ai = await analyzeTranscript(transcript).catch((e) => { console.error("call analysis error", e.message); return null; });
+      if (ai) { summary = summary || ai.summary || ""; data = Object.keys(data).length ? data : ai; }
+    }
+    summary = summary || "Nincs összefoglaló.";
     const recording = m.artifact?.recordingUrl || m.recordingUrl || "";
     const started = m.startedAt || call.startedAt;
     const ended = m.endedAt || call.endedAt;
