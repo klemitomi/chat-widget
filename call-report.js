@@ -110,7 +110,7 @@ router.post("/call-report", async (req, res) => {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        from: "Réka – KlementForge AI asszisztens <ai@klementforge.com>",
+        from: "Nikoletta – KlementForge AI asszisztens <ai@klementforge.com>",
         to: (process.env.CALL_REPORT_TO || "info@klementforge.com").split(",").map((x) => x.trim()),
         subject,
         html,
