@@ -3,10 +3,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import demoRoutes from "./demo-routes.js";
+import callReport from "./call-report.js";
 
 dotenv.config();
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 // CORS: csak a saját domained(ek)ről engedélyezett a hívás
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
@@ -18,6 +19,7 @@ app.use(
   })
 );
 app.use("/api", demoRoutes);
+app.use("/api", callReport);
 
 
 // A rendszerprompt — ugyanaz a szöveg, amit a Chatbase Instructions mezőjébe is feltöltöttünk
