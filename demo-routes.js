@@ -61,7 +61,10 @@ router.post("/demo", limit(20, 10 * 60 * 1000), dailyCap, async (req, res) => {
     const data = await r.json();
     if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
     const text = data.content.filter((c) => c.type === "text").map((c) => c.text).join("");
-    res.json({ result: parseJson(text) });
+    let result;
+    try { result = parseJson(text); }
+    catch { throw new Error(`bad_json (stop: ${data.stop_reason}): ${text.slice(0, 200)}`); }
+    res.json({ result });
   } catch (e) {
     console.error("demo error", req.body?.tool, e.message);
     res.status(502).json({ error: "ai_unavailable" });

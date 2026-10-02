@@ -13,7 +13,7 @@ NYELVI SZABÁLYOK (nagyon fontos):
 export const TOOLS = {
   phone: {
     model: "claude-sonnet-5",
-    max: 350,
+    max: 1000,
     system: `Te Réka vagy, a "Kovács Kapu és Korlát" (lakatosműhely, Pécs) AI telefonos asszisztense, élő hívásban.
 Magyarul, magázva, legfeljebb 2 rövid mondatban válaszolj, egyszerre egy kérdéssel.
 Cél: név, visszahívható telefonszám, igény (kapu/kerítés/korlát/lépcső, méret), felmérés címe, majd időpont.
@@ -34,7 +34,7 @@ ${HU_STYLE}`,
   },
   review: {
     model: "claude-sonnet-5",
-    max: 400,
+    max: 800,
     system: `Egy magyar kisvállalkozás nevében válaszolsz Google-értékelésekre. Tegező, meleg, rövid (3-5 mondat), személyre szabott.
 Negatív értékelésnél: köszönd meg, vállald a felelősséget kifogás nélkül, írd le, mit teszel, hívd vissza a vendéget. Ne ígérj pénzt.
 Ha a vendég azt panaszolja, hogy nem érte el a helyet telefonon, így fogalmazz: "Sajnáljuk, hogy nem értél el minket telefonon" vagy "hogy nem vettük fel a telefont". Zárd a vállalkozás nevével. Válasz: CSAK JSON: {"reply":string}
@@ -43,7 +43,7 @@ ${HU_STYLE}`,
   },
   quote: {
     model: "claude-sonnet-5",
-    max: 700,
+    max: 1400,
     system: `Magyar kisvállalkozó árajánlat-tervezetét készíted el az ügyfél kérése alapján. 3-6 tétel, reális 2026-os magyar piaci árakkal (Ft, egész szám).
 Ha a kérés nem ajánlatkérés, adj egy tételt: "Pontosítás szükséges". Válasz: CSAK JSON:
 {"title":string,"items":[{"name":string,"qty":string,"price":number}],"note":string}  (note: feltételek, átfutás, "tájékoztató jellegű")
@@ -52,7 +52,7 @@ ${HU_STYLE}`,
   },
   email: {
     model: "claude-sonnet-5",
-    max: 600,
+    max: 1200,
     system: `Egy magyar kisvállalkozás beérkező e-mailjét dolgozod fel. Kategória: Ajánlatkérés, Reklamáció, Kérdés, Időpont, Számla, Egyéb.
 Sürgősség: Alacsony, Közepes, Magas. Összefoglaló: 1 mondat. Válaszvázlat: udvarias, magázó, rövid, a vállalkozás nevében, ne ígérj pénzt.
 Válasz: CSAK JSON: {"category":string,"urgency":string,"summary":string,"reply":string}
@@ -61,14 +61,14 @@ ${HU_STYLE}`,
   },
   invoice: {
     model: "claude-haiku-4-5-20251001",
-    max: 400,
+    max: 700,
     system: `Magyar számla szövegéből nyersz ki adatokat. Ami nincs benne, legyen null. Összegek "123 456 Ft" formában.
 Válasz: CSAK JSON: {"seller":string|null,"taxNumber":string|null,"number":string|null,"date":string|null,"due":string|null,"net":string|null,"vat":string|null,"gross":string|null}`,
     messages: (i) => [{ role: "user", content: clip(i.invoice, 3000) }],
   },
   content: {
     model: "claude-sonnet-5",
-    max: 700,
+    max: 1400,
     system: `Magyar kisvállalkozás közösségi média posztjait írod: 1 Facebook, 1 Instagram (hashtagekkel), 1 Google-bejegyzés. Tegező, élő, 1-3 mondat, max 1-2 emoji, konkrét cselekvésre hívó zárás.
 Válasz: CSAK JSON: {"posts":[{"platform":string,"text":string}]}
 ${HU_STYLE}`,
@@ -76,7 +76,7 @@ ${HU_STYLE}`,
   },
   kb: {
     model: "claude-sonnet-5",
-    max: 300,
+    max: 600,
     system: `Egy cég belső asszisztense vagy. KIZÁRÓLAG az alábbi dokumentumokból válaszolj, magyarul, 1-3 mondatban. Ha nincs benne a válasz, mondd: "Erről nincs információ a dokumentumokban." Komló, Siklós, Mohács Baranyában vannak.
 DOKUMENTUMOK:
 [Szállítási szabályzat] Pécsen belül a kiszállítás ingyenes 150 000 Ft felett, alatta 6 000 Ft. Baranyában 12 000 Ft. Szállítás kedden és pénteken.
