@@ -226,6 +226,8 @@ function mockPreview(input, lang) {
 // ---- Végpontok -------------------------------------------------------------
 router.post("/site-preview", limitPerIp(Number(process.env.SITE_PREVIEW_PER_IP || 3), 24 * 60 * 60 * 1000, "sp"), async (req, res) => {
   const b = req.body || {};
+  // Honeypot: ha a rejtett mező ki van töltve, robot — csendben eldobjuk
+  if (b.website) return res.status(400).json({ error: "trade_required" });
   const lang = b.language === "en" ? "en" : "hu";
   const input = { trade: clip(b.trade, 120).trim(), city: clip(b.city, 60).trim(), company: clip(b.company, 60).trim() };
   if (input.trade.length < 3) return res.status(400).json({ error: "trade_required" });
@@ -261,6 +263,7 @@ const esc = (v, n = 400) => clip(v, n).replace(/[&<>"]/g, (c) => ({ "&": "&amp;"
 
 router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (req, res) => {
   const b = req.body || {};
+  if (b.website) return res.json({ ok: true }); // honeypot: robotnak "siker", de nem küldünk semmit
   const name = clip(b.name, 80).trim();
   const contact = clip(b.contact, 120).trim();
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
