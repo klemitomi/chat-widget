@@ -1,6 +1,7 @@
 // site-preview.js — "Lásd a weboldalad 1 perc alatt" demó az /ai-szolgaltatasok oldalra
 //
 // POST /api/site-preview        { trade, city?, company?, language? }  -> { preview, image, live }
+// POST /api/site-preview/refine { preview, instruction, language }  -> { preview, image?, note }
 // POST /api/site-preview/lead   { name, contact, consent, trade, city, company, preview, language }
 //
 // A modell CSAK strukturált tartalmat ad (JSON), HTML-t soha. A megjelenítés a weboldal
@@ -15,6 +16,7 @@
 //   SITE_PREVIEW_MOCK=1  teszt mód: nincs Anthropic- és Pexels-hívás, mintaválasz jön
 //   SITE_PREVIEW_DAILY   napi plafon az összes generálásra (alapból 60)
 //   SITE_PREVIEW_PER_IP  generálás / IP / 24 óra (alapból 3)
+//   SITE_PREVIEW_REFINE_PER_IP  módosítás / IP / 24 óra (alapból 6)
 
 import express from "express";
 import { clip, HU_STYLE } from "./demo-prompts.js";
@@ -53,9 +55,13 @@ function dailyCap(req, res, next) {
 
 // ---- Prompt ----------------------------------------------------------------
 function systemPrompt(lang) {
-  const en = lang === "en";
   return `You write the content of a one-page website DRAFT for a small business, based on a few words from the owner.
-Output language: ${en ? "English" : "Hungarian (magyar), tegező helyett semleges/többes számú megszólítás a látogató felé (pl. \"Kérjen ajánlatot\")"}.
+${rules(lang)}`;
+}
+
+function rules(lang) {
+  const en = lang === "en";
+  return `Output language: ${en ? "English" : "Hungarian (magyar), tegező helyett semleges/többes számú megszólítás a látogató felé (pl. \"Kérjen ajánlatot\")"}.
 
 STRICT HONESTY RULES (most important):
 - Never invent facts: no years of experience, customer counts, ratings, awards, certificates, guarantees, prices, opening hours, addresses, phone numbers, e-mails or testimonials.
@@ -79,6 +85,17 @@ Return ONLY JSON, no markdown:
  "contactCta":string (one short line inviting contact),
  "accent":string (one of: ${ACCENTS.join(", ")} — fits the trade),
  "imageQuery":string (2-4 English words for a stock photo search showing the work itself, e.g. "wrought iron gate", "hair salon interior")}`;
+}
+
+function refinePrompt(lang) {
+  return `You revise an existing one-page website DRAFT for a small business. The owner tells you what to change.
+- Apply the requested change and keep everything else as it was.
+- The owner MAY state real facts about their own business in the request (for example years in business, a company name, a service they offer). You may use exactly what they stated, nothing more.
+- If the request asks for a different photo, or the topic of the photo should change, set "newImage": true and give a fitting "imageQuery".
+- If the request is unrelated to the website or impossible, keep the draft unchanged and explain briefly in "note".
+- Add a field "note": one short sentence to the owner, in the output language, saying what you changed (no greeting, no praise).
+${rules(lang)}
+Also include: "newImage": boolean, "note": string.`;
 }
 
 function userPrompt({ trade, city, company }) {
@@ -125,7 +142,7 @@ const UTM = "utm_source=klementforge&utm_medium=referral";
 const withUtm = (u) => (u ? `${u}${u.includes("?") ? "&" : "?"}${UTM}` : u);
 const imgCache = new Map();
 
-async function fromUnsplash(query) {
+async function fromUnsplash(query, exclude) {
   const key = process.env.UNSPLASH_ACCESS_KEY;
   if (!key) return null;
   const r = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=6&orientation=landscape&content_filter=high`, {
@@ -133,9 +150,10 @@ async function fromUnsplash(query) {
     signal: AbortSignal.timeout(4000),
   });
   if (!r.ok) throw new Error(`Unsplash ${r.status}`);
-  const list = (await r.json()).results || [];
+  const all = (await r.json()).results || [];
+  const list = all.filter((x) => !exclude || !String(exclude).startsWith(x.urls?.raw || "\u0000"));
   if (!list.length) return null;
-  const ph = list[Math.floor(Math.random() * Math.min(3, list.length))];
+  const ph = list[Math.floor(Math.random() * Math.min(exclude ? 5 : 3, list.length))];
   // Kötelező letöltés-jelzés (csak statisztika, nem várjuk meg)
   if (ph.links?.download_location) {
     fetch(ph.links.download_location, { headers: { Authorization: `Client-ID ${key}` } }).catch(() => {});
@@ -153,7 +171,7 @@ async function fromUnsplash(query) {
   };
 }
 
-async function fromPexels(query) {
+async function fromPexels(query, exclude) {
   const key = process.env.PEXELS_API_KEY;
   if (!key) return null;
   const r = await fetch(`https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=6&orientation=landscape`, {
@@ -161,9 +179,9 @@ async function fromPexels(query) {
     signal: AbortSignal.timeout(4000),
   });
   if (!r.ok) throw new Error(`Pexels ${r.status}`);
-  const photos = (await r.json()).photos || [];
+  const photos = ((await r.json()).photos || []).filter((x) => !exclude || ![x.src?.large2x, x.src?.large].includes(exclude));
   if (!photos.length) return null;
-  const ph = photos[Math.floor(Math.random() * Math.min(3, photos.length))];
+  const ph = photos[Math.floor(Math.random() * Math.min(exclude ? 5 : 3, photos.length))];
   return {
     src: ph.src?.large2x || ph.src?.large,
     srcSmall: ph.src?.large || ph.src?.medium,
@@ -176,12 +194,12 @@ async function fromPexels(query) {
   };
 }
 
-async function findImage(query) {
+async function findImage(query, exclude) {
   if (!query) return null;
-  if (imgCache.has(query)) return imgCache.get(query);
+  if (!exclude && imgCache.has(query)) return imgCache.get(query);
   for (const provider of [fromUnsplash, fromPexels]) {
     try {
-      const img = await provider(query);
+      const img = await provider(query, exclude);
       if (img?.src) {
         if (imgCache.size > 200) imgCache.delete(imgCache.keys().next().value);
         imgCache.set(query, img);
@@ -254,6 +272,56 @@ router.post("/site-preview", limitPerIp(Number(process.env.SITE_PREVIEW_PER_IP |
       res.json({ preview, image, live: true });
     } catch (e) {
       console.error("site-preview error", e.message);
+      res.status(502).json({ error: "ai_unavailable" });
+    }
+  });
+});
+
+// Bejövő (kliens által visszaküldött) vázlat megtisztítása, mielőtt a modellnek adjuk
+function cleanIncoming(p) {
+  const base = sanitize(p || {}, { trade: p?.trade, city: p?.city, company: "" });
+  return base;
+}
+
+router.post("/site-preview/refine", limitPerIp(Number(process.env.SITE_PREVIEW_REFINE_PER_IP || 6), 24 * 60 * 60 * 1000, "spr"), async (req, res) => {
+  const b = req.body || {};
+  if (b.website) return res.status(400).json({ error: "invalid" });
+  const lang = b.language === "en" ? "en" : "hu";
+  const instruction = clip(b.instruction, 300).trim();
+  const current = cleanIncoming(b.preview);
+  if (instruction.length < 3 || !current.hero.title) return res.status(400).json({ error: "invalid" });
+
+  if (process.env.SITE_PREVIEW_MOCK === "1" || !process.env.ANTHROPIC_API_KEY) {
+    const next = { ...current, hero: { ...current.hero, subtitle: `${current.hero.subtitle} (${instruction})`.slice(0, 220) } };
+    return res.json({ preview: next, image: null, note: lang === "en" ? "Sample change (test mode)." : "Minta módosítás (teszt mód).", live: false });
+  }
+
+  dailyCap(req, res, async () => {
+    try {
+      const { trade, city, ...content } = current;
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 1300,
+          system: refinePrompt(lang),
+          messages: [{ role: "user", content: `Trade: ${trade}${city ? `\nTown: ${city}` : ""}\nCurrent draft JSON:\n${JSON.stringify(content)}\n\nOwner's request: ${instruction}` }],
+        }),
+        signal: AbortSignal.timeout(45000),
+      });
+      const data = await r.json();
+      if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
+      const text = data.content.filter((c) => c.type === "text").map((c) => c.text).join("");
+      const raw = parseJson(text);
+      const preview = sanitize(raw, { trade, city, company: "" });
+      if (!preview.hero.title || preview.services.length < 2) throw new Error("incomplete");
+      const wantImage = raw.newImage === true || preview.imageQuery !== current.imageQuery;
+      const image = wantImage ? await findImage(preview.imageQuery, raw.newImage === true ? clip(b.currentImage, 400) : null) : null;
+      console.log(`site-preview refine ok: "${trade}" img=${image ? "new" : "keep"}`);
+      res.json({ preview, image, note: clip(typeof raw.note === "string" ? raw.note : "", 200), live: true });
+    } catch (e) {
+      console.error("site-preview refine error", e.message);
       res.status(502).json({ error: "ai_unavailable" });
     }
   });
