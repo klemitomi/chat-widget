@@ -27,7 +27,7 @@ const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
 // A frontend ugyanezeket ismeri — a modell csak ezek közül választhat
 export const ICONS = ["tools", "home", "truck", "leaf", "heart", "star", "shield", "clock", "chat", "calendar", "camera", "cut", "food", "car", "bolt", "drop", "paint", "hammer", "people", "book"];
 export const ACCENTS = ["cyan", "amber", "emerald", "rose", "violet", "orange"];
-export const TEMPLATES = ["ipari"]; // további sablonok később: pl. "elegans", "baratsagos"
+export const TEMPLATES = ["ipari", "elegans", "baratsagos"]; // a frontend PreviewStudio TEMPLATES-ével egyezik
 
 // ---- Limitálás (memóriában, függőség nélkül) --------------------------------
 const perIp = new Map();
@@ -74,7 +74,7 @@ STYLE RULES:
 ${en ? "" : HU_STYLE}
 
 Return ONLY JSON, no markdown:
-{"template":string (one of: ${TEMPLATES.join(", ")}),
+{"template":string (one of: ${TEMPLATES.join(", ")}; pick by trade: "ipari" = bold industrial look for trades, construction, metal, wood, auto, transport, machinery, cleaning; "elegans" = refined serif look for premium or calm services: restaurants, wineries, accommodation, interior design, architecture, law, accounting, photography, aesthetic clinics; "baratsagos" = warm, rounded, friendly look for personal and family services: hairdressers, beauty, cafés, bakeries, pets, kids, fitness, health practices, tutoring),
  "brand":string|null,
  "accent":string (one of: ${ACCENTS.join(", ")} — fits the trade),
  "hero":{"eyebrow":string (3-4 short keywords joined with " · ", e.g. "Tervezés · Gyártás · Szerelés"),"title":string,"subtitle":string (max 30 words),"cta":string (neutral, e.g. "Kérjen ajánlatot")},
