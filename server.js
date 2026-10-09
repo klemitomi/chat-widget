@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import demoRoutes from "./demo-routes.js";
 import callReport from "./call-report.js";
+import sitePreview from "./site-preview.js";
 
 dotenv.config();
 const app = express();
@@ -20,6 +21,7 @@ app.use(
 );
 app.use("/api", demoRoutes);
 app.use("/api", callReport);
+app.use("/api", sitePreview);
 
 
 // A rendszerprompt — ugyanaz a szöveg, amit a Chatbase Instructions mezőjébe is feltöltöttünk
