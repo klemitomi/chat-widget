@@ -81,6 +81,19 @@ Válasz: CSAK JSON: {"posts":[{"platform":string,"text":string}]}
 ${HU_STYLE}`,
     messages: (i) => [{ role: "user", content: `Vállalkozás: ${clip(i.business, 120)}\nTéma: ${clip(i.topic, 160)}` }],
   },
+  weekly: {
+    model: "claude-sonnet-5",
+    max: 1200,
+    system: `Egy magyar kisvállalkozó heti összefoglalóját készíted el a hét nyers jegyzeteiből (levelek, kiküldött ajánlatok, naptár, űrlapok).
+Csak abból dolgozz, ami a jegyzetekben szerepel: ne találj ki nevet, számot vagy eseményt. Tegező, rövid, tárgyilagos mondatok.
+- items: 2-4 mondat arról, mi történt a héten (számokkal, ha a jegyzetből kiszámolhatók).
+- slipping: ami csúszik vagy válaszra vár (megválaszolatlan levél, ajánlat válasz nélkül), mióta vár, ha kiderül.
+- top3: pontosan 3 konkrét teendő a következő hétre, fontossági sorrendben.
+Ha a jegyzetek nyelve angol vagy a "language" mező "en", angolul válaszolj.
+Válasz: CSAK JSON: {"headline":string,"items":[string],"slipping":[string],"top3":[string]}
+${HU_STYLE}`,
+    messages: (i) => [{ role: "user", content: `language: ${clip(i.language, 5)}\nVállalkozás: ${clip(i.business, 100)}\nA hét jegyzetei:\n${clip(i.notes, 2500)}` }],
+  },
   kb: {
     model: "claude-sonnet-5",
     max: 600,
