@@ -126,6 +126,23 @@
    const messagesEl = win.querySelector("#kf-chat-messages");
     const inputEl = win.querySelector("#kf-chat-input");
     const history = [];
+    const MAX_MESSAGES = 15;
+    let userCount = 0;
+    let locked = false;
+
+    // Munkamenet-azonosító: oldalfrissítés után is ugyanaz marad (ugyanabban a fülben)
+    let sessionId;
+    try { sessionId = sessionStorage.getItem("kf-chat-sid"); } catch (e) {}
+    if (!sessionId) {
+      sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      try { sessionStorage.setItem("kf-chat-sid", sessionId); } catch (e) {}
+    }
+
+    function lockInput() {
+      locked = true;
+      inputEl.disabled = true;
+      inputEl.placeholder = "A beszélgetés lezárult";
+    }
 
    function addMessage(role, text) {
          const div = document.createElement("div");
@@ -150,7 +167,13 @@
 
    async function sendMessage() {
          const text = inputEl.value.trim();
-         if (!text) return;
+         if (!text || locked) return;
+         if (userCount >= MAX_MESSAGES) {
+                 addMessage("assistant", "Ennek a beszélgetésnek elérted az üzenetkorlátját. Írj az info@klementforge.com címre, vagy hívj a +36 30 852 9593 számon.");
+                 lockInput();
+                 return;
+         }
+         userCount++;
          inputEl.value = "";
          addMessage("user", text);
          history.push({ role: "user", content: text });
@@ -165,13 +188,14 @@
               const res = await fetch(API_URL, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ messages: history }),
+                        body: JSON.stringify({ messages: history, sessionId }),
               });
               const data = await res.json();
               thinkingEl.remove();
               const reply = data.reply || "Elnézést, most nem tudok válaszolni. Próbáld meg később.";
               addMessage("assistant", reply);
               history.push({ role: "assistant", content: reply });
+              if (data.blocked || userCount >= MAX_MESSAGES) lockInput();
       } catch (err) {
               thinkingEl.remove();
               addMessage("assistant", "Hiba történt a kapcsolódás közben. Kérlek próbáld meg később.");

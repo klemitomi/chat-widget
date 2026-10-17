@@ -49,18 +49,88 @@ Barátságos, magabiztos, tömör, magyarul kommunikálsz alapértelmezésben. F
 2. Miután megadtad a konkrét információt, mindig tedd hozzá: ha egyedi igénye van (pl. speciális funkció, AI-integráció, vagy a csomagoktól eltérő igény), kérdezd meg a nevét és email címét, hogy személyre szabott ajánlatot tudjatok készíteni.
 3. Ha valaki bemutatkozik, reagálj rá név szerint, és vidd tovább a beszélgetést konkrét következő lépés felé.
 
+### Elérhetőség (csak ezeket add meg, SOHA ne találj ki más címet vagy számot)
+- Email: info@klementforge.com
+- Telefon: +36 30 852 9593
+- Weboldal: klementforge.com
+Ha valaki telefonszámot vagy emailt kér, ezeket add meg azonnal, pontosan így.
+
+### Témakör
+- Kizárólag a KlementForge szolgáltatásairól beszélj: weboldal-készítés, redizájn, AI-megoldások, árak, folyamat, átfutási idő, kapcsolatfelvétel.
+- Programozási, házi feladat, tanulási vagy bármilyen más általános kérdésre (pl. Python, matematika, fordítás, szövegírás) NE adj kódot, magyarázatot vagy példát — egy része sem. Udvariasan, egy mondatban jelezd, hogy ebben nem tudsz segíteni, mert a KlementForge szolgáltatásairól adsz tájékoztatást, és kérdezd meg, van-e weboldallal vagy AI-megoldással kapcsolatos kérdése.
+- Ha a felhasználó ismételten témán kívüli kérdést tesz fel, maradj ennél a válasznál, ne engedj.
+
+### Stílus
+- Rövid válaszok: legfeljebb 3–5 mondat.
+- Nyelvtanilag hibátlan, természetes magyar nyelv.
+
 ### Korlátok
-- Ne találj ki árat vagy funkciót, amit a fenti lista nem tartalmaz.
+- Ne találj ki árat, funkciót vagy elérhetőséget, amit a fenti lista nem tartalmaz.
 - Ne állítsd magadról, hogy melyik AI-modellen futsz.
 - Ha valaki elérhetőséget ad meg (email vagy telefon), tudasd vele, hogy hamarosan felveszik vele a kapcsolatot.
 - SOHA ne beszéld le az érdeklődőt, és ne írj olyat, hogy "nem vagyunk a legjobb választás", "nem hozzánk illik", vagy hasonló elutasító/lebeszélő mondatot — még akkor sem, ha a kérés egyszerűnek vagy kis értékűnek tűnik.
 - Ha nem tudsz konkrét választ adni, vagy nincs elég adatod egy kéréshez, SOHA ne utasítsd el vagy zárd le negatívan a beszélgetést. Mindig oldás-orientáltan válaszolj: mondd meg, hogy ezt egyedileg tudjátok kezelni, és kérd el a nevét és email címét, hogy Tamás (a KlementForge alapítója) közvetlenül felvegye vele a kapcsolatot.`;
 
+// ── Munkamenet- és IP-korlát ───────────────────────────────────────────
+// Egy munkamenetben legfeljebb MAX_MESSAGES felhasználói üzenet.
+// Ha ugyanarról az IP-ről új munkamenet indul (az IP_MEMORY_HOURS időn belül),
+// a bot már csak ennyit válaszol: "Már válaszoltam."
+// Az adatok memóriában vannak: a szerver újraindulásakor (Render free: alvás) törlődnek.
+const MAX_MESSAGES = Number(process.env.CHAT_MAX_MESSAGES || 15);
+const IP_MEMORY_MS = Number(process.env.CHAT_IP_MEMORY_HOURS || 24) * 60 * 60 * 1000;
+const ALREADY_ANSWERED = "Már válaszoltam.";
+const LIMIT_REACHED =
+  "Ennek a beszélgetésnek elérted az üzenetkorlátját. Ha kérdésed van, írj az info@klementforge.com címre, vagy hívj a +36 30 852 9593 számon.";
+
+// ip -> { sessionId, count, lastSeen, notified }
+const ipState = new Map();
+
+function getClientIp(req) {
+  const fwd = req.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd.length) return fwd.split(",")[0].trim();
+  return req.socket.remoteAddress || "unknown";
+}
+
+// Régi bejegyzések takarítása óránként
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, s] of ipState) if (now - s.lastSeen > IP_MEMORY_MS) ipState.delete(ip);
+}, 60 * 60 * 1000).unref();
+
 app.post("/api/chat", async (req, res) => {
-  const { messages } = req.body;
+  const { messages, sessionId } = req.body;
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: "Missing messages" });
   }
+
+  const ip = getClientIp(req);
+  const sid = typeof sessionId === "string" && sessionId ? sessionId.slice(0, 64) : "no-session";
+  const now = Date.now();
+  let state = ipState.get(ip);
+  if (state && now - state.lastSeen > IP_MEMORY_MS) state = undefined;
+
+  if (state && state.sessionId !== sid) {
+    // Visszatérő IP új munkamenettel
+    state.lastSeen = now;
+    return res.json({ reply: ALREADY_ANSWERED, blocked: true });
+  }
+  if (!state) {
+    state = { sessionId: sid, count: 0, lastSeen: now, notified: false };
+    ipState.set(ip, state);
+  }
+  if (state.count >= MAX_MESSAGES) {
+    state.lastSeen = now;
+    return res.json({ reply: LIMIT_REACHED, blocked: true });
+  }
+  state.count += 1;
+  state.lastSeen = now;
+
+  // A kliens által küldött előzményt is levágjuk, hogy ne lehessen felfújni
+  const trimmed = messages
+    .slice(-MAX_MESSAGES * 2)
+    .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content || "").slice(0, 2000) }));
+  while (trimmed.length && trimmed[0].role !== "user") trimmed.shift();
+  if (!trimmed.length) return res.status(400).json({ error: "Missing messages" });
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -74,7 +144,7 @@ app.post("/api/chat", async (req, res) => {
         model: "claude-haiku-4-5-20251001",
         max_tokens: 500,
         system: SYSTEM_PROMPT,
-        messages: messages,
+        messages: trimmed,
       }),
     });
 
@@ -82,14 +152,23 @@ app.post("/api/chat", async (req, res) => {
     const reply = data.content?.[0]?.text || "Elnézést, nem sikerült választ generálni.";
     if (!data.content) console.error("Anthropic API error response:", JSON.stringify(data));
 
-    // Egyszerű lead-jelzés: ha a beszélgetésben szerepel email cím, értesítünk
-    const fullText = messages.map((m) => m.content).join(" ") + " " + reply;
-    const emailMatch = fullText.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
-    if (emailMatch) {
-      await notifyLead(fullText, emailMatch[0]);
+    // Lead-jelzés: CSAK a látogató saját üzeneteiben keresünk email címet vagy telefonszámot
+    // (a bot válaszában szereplő saját címünk nem lead), és munkamenetenként egyszer értesítünk.
+    const userText = trimmed.filter((m) => m.role === "user").map((m) => m.content).join("\n");
+    const emails = (userText.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) || []).filter(
+      (e) => !/klementforge\./i.test(e)
+    );
+    const phone = userText.match(/(\+?36|06)[\s\-/]?\d{1,2}[\s\-/]?\d{3}[\s\-/]?\d{3,4}/);
+    const contact = emails[0] || phone?.[0];
+    if (contact && !state.notified) {
+      state.notified = true;
+      const transcript = [...trimmed, { role: "assistant", content: reply }]
+        .map((m) => `${m.role === "user" ? "Látogató" : "Bot"}: ${m.content}`)
+        .join("\n\n");
+      await notifyLead(transcript, contact);
     }
 
-    res.json({ reply });
+    res.json({ reply, remaining: Math.max(0, MAX_MESSAGES - state.count) });
   } catch (err) {
     console.error("Chat API error:", err.message);
     res.status(500).json({ error: "Server error" });
@@ -105,10 +184,11 @@ async function notifyLead(conversationText, leadEmail) {
                           "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                          from: "KlementForge Chatbot <onboarding@resend.dev>",
+                          // Hitelesített domain után állítsd be Renderen: RESEND_FROM="KlementForge Chatbot <chatbot@klementforge.com>"
+                          from: process.env.RESEND_FROM || "KlementForge Chatbot <onboarding@resend.dev>",
                           to: process.env.GMAIL_EMAIL,
                           subject: `Új lead a chatbotból (${leadEmail})`,
-                          text: `A chatbot beszélgetésben egy email cím szerepelt: ${leadEmail}\n\nBeszélgetés részlete:\n${conversationText}`,
+                          text: `A látogató elérhetőséget adott meg: ${leadEmail}\n\nBeszélgetés:\n\n${conversationText}`,
               }),
     });
           if (!res.ok) {
