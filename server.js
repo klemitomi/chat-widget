@@ -5,6 +5,7 @@ import nodemailer from "nodemailer";
 import demoRoutes from "./demo-routes.js";
 import callReport from "./call-report.js";
 import sitePreview from "./site-preview.js";
+import { clientIp, dailyLimiter } from "./client-ip.js";
 
 dotenv.config();
 const app = express();
@@ -86,11 +87,9 @@ const LIMIT_REACHED =
 // ip -> { sessionId, count, lastSeen, notified }
 const ipState = new Map();
 
-function getClientIp(req) {
-  const fwd = req.headers["x-forwarded-for"];
-  if (typeof fwd === "string" && fwd.length) return fwd.split(",")[0].trim();
-  return req.socket.remoteAddress || "unknown";
-}
+const getClientIp = clientIp;
+// Napi plafon a teljes chatre (költségvédelem, akkor is, ha valaki IP-t hamisít)
+const chatDaily = dailyLimiter(Number(process.env.CHAT_DAILY_MAX || 400));
 
 // Régi bejegyzések takarítása óránként
 setInterval(() => {
@@ -122,6 +121,9 @@ app.post("/api/chat", async (req, res) => {
   if (state.count >= MAX_MESSAGES) {
     state.lastSeen = now;
     return res.json({ reply: LIMIT_REACHED, blocked: true });
+  }
+  if (!chatDaily()) {
+    return res.json({ reply: "Az AI asszisztens most nem elérhető. Írj az info@klementforge.com címre, vagy hívj a +36 30 852 9593 számon.", blocked: true });
   }
   state.count += 1;
   state.lastSeen = now;

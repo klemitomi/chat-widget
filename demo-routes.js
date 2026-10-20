@@ -10,6 +10,11 @@
 
 import express from "express";
 import { TOOLS, clip } from "./demo-prompts.js";
+import { clientIp, dailyLimiter } from "./client-ip.js";
+
+// A felmérés visszaigazoló levele idegen címre megy: napi plafon, hogy ne lehessen spamre használni a domaint
+const confirmDaily = dailyLimiter(Number(process.env.LEAD_CONFIRM_DAILY_MAX || 20));
+const leadDaily = dailyLimiter(Number(process.env.LEAD_DAILY_MAX || 40));
 
 const router = express.Router();
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
@@ -18,7 +23,7 @@ const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 const hits = new Map();
 function limit(max, windowMs) {
   return (req, res, next) => {
-    const key = `${max}:${req.headers["x-forwarded-for"]?.split(",")[0] || req.ip}`;
+    const key = `${max}:${clientIp(req)}`;
     const now = Date.now();
     const list = (hits.get(key) || []).filter((t) => now - t < windowMs);
     if (list.length >= max) return res.status(429).json({ error: "rate_limited" });
@@ -93,7 +98,8 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
   const b = req.body || {};
   const email = clip(b.email, 120);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || b.consent !== true) return res.status(400).json({ error: "invalid" });
-  const hours = Number(b.estimateHours) || 0;
+  if (!leadDaily()) return res.status(429).json({ error: "daily_limit" });
+  const hours = Math.max(0, Math.min(999, Math.round(Number(b.estimateHours) || 0)));
   const answers = Object.entries(b.answers || {}).slice(0, 10).map(([q, a]) => `<li>${esc(q)}<br><b>${esc(a)}</b></li>`).join("");
   const recs = (Array.isArray(b.recommended) ? b.recommended : []).slice(0, 3).map(esc).join(", ");
   try {
@@ -104,7 +110,8 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
       subject: `Új AI-felmérés: ${clip(b.company || b.name, 80)} (kb. ${hours} óra/hó)`,
       html: `<p><b>${esc(b.name)}</b> (${esc(email)}), ${esc(b.company)}</p><p>Becslés: kb. ${hours} óra/hó. Javasolt: ${recs}</p><ol>${answers}</ol>`,
     });
-    await sendMail({
+    // Visszaigazolás a kitöltőnek — csak a napi keretig; utána Tamás kézzel válaszol (az értesítő úgyis megjött)
+    if (confirmDaily()) await sendMail({
       from: "Klement Tamás <ai@klementforge.com>",
       to: email,
       subject: "Megkaptam az AI-felmérésed",

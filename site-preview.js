@@ -20,6 +20,7 @@
 
 import express from "express";
 import { clip, HU_STYLE } from "./demo-prompts.js";
+import { clientIp, dailyLimiter } from "./client-ip.js";
 
 const router = express.Router();
 const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
@@ -31,7 +32,8 @@ export const TEMPLATES = ["ipari", "elegans", "baratsagos"]; // a frontend Previ
 
 // ---- Limitálás (memóriában, függőség nélkül) --------------------------------
 const perIp = new Map();
-function ipOf(req) { return req.headers["x-forwarded-for"]?.split(",")[0].trim() || req.ip; }
+const ipOf = clientIp;
+const previewLeadDaily = dailyLimiter(Number(process.env.PREVIEW_LEAD_DAILY_MAX || 30));
 function limitPerIp(max, windowMs, bucket) {
   return (req, res, next) => {
     const key = `${bucket}:${ipOf(req)}`;
@@ -379,6 +381,7 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
   const isPhone = /^[+\d][\d\s/()-]{6,}$/.test(contact);
   if (!name || !(isEmail || isPhone) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (!previewLeadDaily()) return res.status(429).json({ error: "daily_limit" });
 
   const p = b.preview || {};
   const li = (arr, f) => (Array.isArray(arr) ? arr : []).slice(0, 6).map(f).join("");
