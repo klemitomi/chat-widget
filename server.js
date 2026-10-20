@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
 import demoRoutes from "./demo-routes.js";
 import callReport from "./call-report.js";
 import sitePreview from "./site-preview.js";
