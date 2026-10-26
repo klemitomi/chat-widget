@@ -5,6 +5,7 @@ import demoRoutes from "./demo-routes.js";
 import callReport from "./call-report.js";
 import sitePreview from "./site-preview.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
+import { emailDomainOk } from "./email-check.js";
 
 dotenv.config();
 const app = express();
@@ -157,9 +158,10 @@ app.post("/api/chat", async (req, res) => {
     // Lead-jelzés: CSAK a látogató saját üzeneteiben keresünk email címet vagy telefonszámot
     // (a bot válaszában szereplő saját címünk nem lead), és munkamenetenként egyszer értesítünk.
     const userText = trimmed.filter((m) => m.role === "user").map((m) => m.content).join("\n");
-    const emails = (userText.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) || []).filter(
-      (e) => !/klementforge\./i.test(e)
-    );
+    const emails = [];
+    for (const e of (userText.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) || []).filter((e) => !/klementforge\./i.test(e))) {
+      if (await emailDomainOk(e)) emails.push(e); // kitalált / nem létező domain nem lead
+    }
     const phone = userText.match(/(\+?36|06)[\s\-/]?\d{1,2}[\s\-/]?\d{3}[\s\-/]?\d{3,4}/);
     const contact = emails[0] || phone?.[0];
     if (contact && !state.notified) {

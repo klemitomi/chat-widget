@@ -11,6 +11,7 @@
 import express from "express";
 import { TOOLS, clip } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
+import { emailDomainOk } from "./email-check.js";
 
 // A felmérés visszaigazoló levele idegen címre megy: napi plafon, hogy ne lehessen spamre használni a domaint
 const confirmDaily = dailyLimiter(Number(process.env.LEAD_CONFIRM_DAILY_MAX || 20));
@@ -98,6 +99,7 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
   const b = req.body || {};
   const email = clip(b.email, 120);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (!(await emailDomainOk(email))) return res.status(400).json({ error: "invalid_email" });
   if (!leadDaily()) return res.status(429).json({ error: "daily_limit" });
   const hours = Math.max(0, Math.min(999, Math.round(Number(b.estimateHours) || 0)));
   const answers = Object.entries(b.answers || {}).slice(0, 10).map(([q, a]) => `<li>${esc(q)}<br><b>${esc(a)}</b></li>`).join("");
