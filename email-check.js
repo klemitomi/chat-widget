@@ -8,6 +8,8 @@ const BLOCKED_EMAIL_DOMAINS = new Set([
   "mailinator.com", "guerrillamail.com", "10minutemail.com", "tempmail.com", "temp-mail.org", "yopmail.com", "trashmail.com", "sharklasers.com",
   "getnada.com", "throwawaymail.com", "dispostable.com", "maildrop.cc", "fakeinbox.com", "mailnesia.com", "mintemail.com",
 ]);
+// gyakori elírt domainek (a valódi címzett szinte biztosan nem ezt akarta)
+for (const d of ["gamil.com", "gmial.com", "gmai.com", "gmil.com", "gmal.com", "gmaill.com", "gmail.con", "gmail.co", "gmail.cm", "gmail.om", "gmail.hu", "gnail.com", "gmeil.com", "gmali.com", "gmsil.com", "freemal.hu", "freemail.com", "freeemail.hu", "freemai.hu", "citromail.com", "hotmial.com", "hotmal.com", "hotmail.con", "outlok.com", "outllook.com", "yaho.com", "yahooo.com", "yahoo.hu", "icloud.hu"]) BLOCKED_EMAIL_DOMAINS.add(d);
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("timeout"), { code: "ETIMEOUT" })), ms))]);
 const mxCache = new Map(); // domain -> { ok, at }
 export async function emailDomainOk(email) {
