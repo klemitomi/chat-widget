@@ -14,9 +14,9 @@
 //   RESEND_API_KEY      (már megvan) — lead e-mailhez
 //   LEAD_TO             opcionális, alapból info@klementforge.com
 //   SITE_PREVIEW_MOCK=1 teszt mód: nincs Anthropic- és képhívás, mintaválasz jön
-//   SITE_PREVIEW_DAILY  napi plafon az összes generálásra + módosításra (alapból 60)
-//   SITE_PREVIEW_PER_IP generálás / IP / 24 óra (alapból 3)
-//   SITE_PREVIEW_REFINE_PER_IP  módosítás / IP / 24 óra (alapból 6)
+//   SITE_PREVIEW_DAILY  napi plafon az összes generálásra + módosításra (alapból 15)
+//   SITE_PREVIEW_PER_IP generálás / IP / 24 óra (legfeljebb 3, env csak csökkenteni tud; minden próbálkozás számít)
+//   SITE_PREVIEW_REFINE_PER_IP  módosítás / IP / 24 óra (legfeljebb 3, env csak csökkenteni tud)
 //   TURNSTILE_SECRET    opcionális: Cloudflare Turnstile secret. Ha be van állítva, a generálás és a lead
 //                       csak érvényes "turnstileToken" mezővel megy át (a frontendnek küldenie kell)
 
@@ -24,7 +24,8 @@ import express from "express";
 import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
-import { isBlockedText, isBlockedDeep, isJunkLead, GUARD_RULE, turnstileOk } from "./content-guard.js";
+import { createHash } from "node:crypto";
+import { isBlockedText, isBlockedDeep, isJunkLead, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
 const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
@@ -37,6 +38,9 @@ export const TEMPLATES = ["ipari", "elegans", "baratsagos"]; // a frontend Previ
 // ---- Limitálás (memóriában, függőség nélkül) --------------------------------
 const perIp = new Map();
 const ipOf = clientIp;
+// Naplózáshoz: az IP rövidített lenyomata (nem az IP maga), hogy látszódjon, egy vagy több látogatótól jön-e a forgalom
+const ipTag = (req) => createHash("sha256").update(String(ipOf(req))).digest("hex").slice(0, 8);
+const capAtThree = (v, fallback = 3) => Math.max(1, Math.min(3, Number(v) || fallback));
 const previewLeadDaily = dailyLimiter(Number(process.env.PREVIEW_LEAD_DAILY_MAX || 30));
 function limitPerIp(max, windowMs, bucket) {
   return (req, res, next) => {
@@ -55,7 +59,7 @@ let daily = { day: new Date().toDateString(), count: 0 };
 function dailyCap(req, res, next) {
   const today = new Date().toDateString();
   if (daily.day !== today) daily = { day: today, count: 0 };
-  if (daily.count >= Number(process.env.SITE_PREVIEW_DAILY || 60)) return res.status(429).json({ error: "daily_limit" });
+  if (daily.count >= Number(process.env.SITE_PREVIEW_DAILY || 15)) return res.status(429).json({ error: "daily_limit" });
   daily.count++;
   next();
 }
@@ -317,15 +321,15 @@ const complete = (p) => p.hero.title && p.services.length >= 3 && p.process.leng
 const useMock = () => process.env.SITE_PREVIEW_MOCK === "1" || !process.env.ANTHROPIC_API_KEY;
 
 // ---- Végpontok -------------------------------------------------------------
-router.post("/site-preview", limitPerIp(Number(process.env.SITE_PREVIEW_PER_IP || 3), 24 * 60 * 60 * 1000, "sp"), async (req, res) => {
+router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_IP), 24 * 60 * 60 * 1000, "sp"), async (req, res) => {
   const b = req.body || {};
   // Honeypot: ha a rejtett mező ki van töltve, robot — csendben eldobjuk
   if (b.website) return res.status(400).json({ error: "trade_required" });
   const lang = b.language === "en" ? "en" : "hu";
   const input = { trade: clip(b.trade, 120).trim(), city: clip(b.city, 60).trim(), company: clip(b.company, 60).trim() };
   if (input.trade.length < 3) return res.status(400).json({ error: "trade_required" });
-  if (isBlockedText(input.trade, input.city, input.company)) {
-    console.warn(`site-preview blocked: "${input.trade.slice(0, 60)}"`);
+  if (isBlockedText(input.trade, input.city, input.company) || isInjectionAttempt(input.trade, input.company) || isLegalTell(input.trade, input.company)) {
+    console.warn(`site-preview blocked: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
     return res.status(422).json({ error: "not_allowed" });
   }
   if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
@@ -336,30 +340,30 @@ router.post("/site-preview", limitPerIp(Number(process.env.SITE_PREVIEW_PER_IP |
     try {
       const raw = await askModel(systemPrompt(lang), userPrompt(input), 2200);
       if (raw?.refuse === true) {
-        console.warn(`site-preview refused by model: "${input.trade.slice(0, 60)}"`);
+        console.warn(`site-preview refused by model: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
         return res.status(422).json({ error: "not_allowed" });
       }
       const preview = sanitize(raw, input);
       if (!complete(preview)) throw new Error("incomplete");
       const { image, gallery } = await findImages(preview);
-      console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0}`);
+      console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0} ip=${ipTag(req)}`);
       res.json({ preview, image, gallery, live: true });
     } catch (e) {
-      console.error("site-preview error", e.message);
+      console.error("site-preview error", e.message, `ip=${ipTag(req)}`);
       res.status(502).json({ error: "ai_unavailable" });
     }
   });
 });
 
-router.post("/site-preview/refine", limitPerIp(Number(process.env.SITE_PREVIEW_REFINE_PER_IP || 6), 24 * 60 * 60 * 1000, "spr"), async (req, res) => {
+router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVIEW_REFINE_PER_IP), 24 * 60 * 60 * 1000, "spr"), async (req, res) => {
   const b = req.body || {};
   if (b.website) return res.status(400).json({ error: "invalid" });
   const lang = b.language === "en" ? "en" : "hu";
   const instruction = clip(b.instruction, 300).trim();
   const current = sanitize(b.preview || {}, { trade: b.preview?.trade, city: b.preview?.city, company: "" });
   if (instruction.length < 3 || !current.hero.title) return res.status(400).json({ error: "invalid" });
-  if (isBlockedText(instruction, current.trade, current.city) || isBlockedDeep(current)) {
-    console.warn(`site-preview refine blocked: "${instruction.slice(0, 60)}"`);
+  if (isBlockedText(instruction, current.trade, current.city) || isBlockedDeep(current) || isInjectionAttempt(instruction) || isLegalTell(instruction)) {
+    console.warn(`site-preview refine blocked: "${instruction.slice(0, 60)}" ip=${ipTag(req)}`);
     return res.status(422).json({ error: "not_allowed" });
   }
 
@@ -383,7 +387,7 @@ router.post("/site-preview/refine", limitPerIp(Number(process.env.SITE_PREVIEW_R
       const gallery = raw.newGallery === true || preview.galleryQuery !== current.galleryQuery;
       const excludeIds = (Array.isArray(b.currentImageIds) ? b.currentImageIds : []).slice(0, 8).map((x) => clip(x, 40));
       const imgs = hero || gallery ? await findImages(preview, { hero, gallery, excludeIds }) : { image: null, gallery: null };
-      console.log(`site-preview refine ok: "${trade}" hero=${hero} gallery=${gallery}`);
+      console.log(`site-preview refine ok: "${trade}" hero=${hero} gallery=${gallery} ip=${ipTag(req)}`);
       res.json({ preview, image: imgs.image, gallery: imgs.gallery, note: clip(typeof raw.note === "string" ? raw.note : "", 200), live: true });
     } catch (e) {
       console.error("site-preview refine error", e.message);
@@ -404,11 +408,11 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
   const isPhone = /^[+\d][\d\s/()-]{6,}$/.test(contact);
   if (!name || !(isEmail || isPhone) || b.consent !== true) return res.status(400).json({ error: "invalid" });
   if (isJunkLead(name, isEmail ? contact : "")) {
-    console.warn(`site-preview lead junk: "${clip(name, 30)}" ${clip(contact, 40)}`); // nem megy e-mail
+    console.warn(`site-preview lead junk: "${clip(name, 30)}" ${clip(contact, 40)} ip=${ipTag(req)}`); // nem megy e-mail
     return res.status(400).json({ error: "invalid" });
   }
-  if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview)) {
-    console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}"`); // nem megy e-mail
+  if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview) || isInjectionAttempt(b.trade, b.company) || isLegalTell(b.trade, b.company)) {
+    console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}" ip=${ipTag(req)}`); // nem megy e-mail
     return res.status(422).json({ error: "not_allowed" });
   }
   if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
