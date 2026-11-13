@@ -17,11 +17,14 @@
 //   SITE_PREVIEW_DAILY  napi plafon az összes generálásra + módosításra (alapból 60)
 //   SITE_PREVIEW_PER_IP generálás / IP / 24 óra (alapból 3)
 //   SITE_PREVIEW_REFINE_PER_IP  módosítás / IP / 24 óra (alapból 6)
+//   TURNSTILE_SECRET    opcionális: Cloudflare Turnstile secret. Ha be van állítva, a generálás és a lead
+//                       csak érvényes "turnstileToken" mezővel megy át (a frontendnek küldenie kell)
 
 import express from "express";
 import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
+import { isBlockedText, isBlockedDeep, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
 const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
@@ -94,11 +97,13 @@ Return ONLY JSON, no markdown:
 
 function systemPrompt(lang) {
   return `You write the content of a one-page website DRAFT for a small business, based on a few words from the owner.
+${GUARD_RULE}
 ${rules(lang)}`;
 }
 
 function refinePrompt(lang) {
   return `You revise an existing one-page website DRAFT for a small business. The owner tells you what to change.
+${GUARD_RULE}
 - Apply the requested change and keep everything else as it was.
 - The owner MAY state real facts about their own business in the request (for example years in business, a company name, a service they offer). You may use exactly what they stated, nothing more.
 - If the request asks for a different main photo, or its topic should change, set "newImage": true and give a fitting "imageQuery".
@@ -319,12 +324,22 @@ router.post("/site-preview", limitPerIp(Number(process.env.SITE_PREVIEW_PER_IP |
   const lang = b.language === "en" ? "en" : "hu";
   const input = { trade: clip(b.trade, 120).trim(), city: clip(b.city, 60).trim(), company: clip(b.company, 60).trim() };
   if (input.trade.length < 3) return res.status(400).json({ error: "trade_required" });
+  if (isBlockedText(input.trade, input.city, input.company)) {
+    console.warn(`site-preview blocked: "${input.trade.slice(0, 60)}"`);
+    return res.status(422).json({ error: "not_allowed" });
+  }
+  if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
 
   if (useMock()) return res.json({ preview: mockPreview(input, lang), image: null, gallery: [], live: false });
 
   dailyCap(req, res, async () => {
     try {
-      const preview = sanitize(await askModel(systemPrompt(lang), userPrompt(input), 2200), input);
+      const raw = await askModel(systemPrompt(lang), userPrompt(input), 2200);
+      if (raw?.refuse === true) {
+        console.warn(`site-preview refused by model: "${input.trade.slice(0, 60)}"`);
+        return res.status(422).json({ error: "not_allowed" });
+      }
+      const preview = sanitize(raw, input);
       if (!complete(preview)) throw new Error("incomplete");
       const { image, gallery } = await findImages(preview);
       console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0}`);
@@ -343,6 +358,10 @@ router.post("/site-preview/refine", limitPerIp(Number(process.env.SITE_PREVIEW_R
   const instruction = clip(b.instruction, 300).trim();
   const current = sanitize(b.preview || {}, { trade: b.preview?.trade, city: b.preview?.city, company: "" });
   if (instruction.length < 3 || !current.hero.title) return res.status(400).json({ error: "invalid" });
+  if (isBlockedText(instruction, current.trade, current.city) || isBlockedDeep(current)) {
+    console.warn(`site-preview refine blocked: "${instruction.slice(0, 60)}"`);
+    return res.status(422).json({ error: "not_allowed" });
+  }
 
   if (useMock()) {
     const next = { ...current, hero: { ...current.hero, subtitle: `${current.hero.subtitle} (${instruction})`.slice(0, 240) } };
@@ -357,6 +376,7 @@ router.post("/site-preview/refine", limitPerIp(Number(process.env.SITE_PREVIEW_R
         `Trade: ${trade}${city ? `\nTown: ${city}` : ""}\nCurrent draft JSON:\n${JSON.stringify(content)}\n\nOwner's request: ${instruction}`,
         2400,
       );
+      if (raw?.refuse === true) return res.status(422).json({ error: "not_allowed" });
       const preview = sanitize(raw, { trade, city, company: "" });
       if (!complete(preview)) throw new Error("incomplete");
       const hero = raw.newImage === true || preview.imageQuery !== current.imageQuery;
@@ -383,6 +403,11 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
   const isPhone = /^[+\d][\d\s/()-]{6,}$/.test(contact);
   if (!name || !(isEmail || isPhone) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview)) {
+    console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}"`); // nem megy e-mail
+    return res.status(422).json({ error: "not_allowed" });
+  }
+  if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
   if (isEmail && !(await emailDomainOk(contact))) return res.status(400).json({ error: "invalid_email" });
   if (!previewLeadDaily()) return res.status(429).json({ error: "daily_limit" });
 
