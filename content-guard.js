@@ -53,6 +53,19 @@ export function isBlockedDeep(v, depth = 0) {
   return false;
 }
 
+// Nyilvánvalóan kamu név / e-mail (billentyűzet-kopogtatás, teszt): "asd", "qwe", "test", "aaa"...
+// Csak az egyértelmű eseteket fogja meg, hogy valódi látogatót ne zárjon ki.
+const JUNK = new Set(["asd", "asdf", "asdfg", "asdasd", "asdsad", "sdf", "sdfsdf", "qwe", "qwer", "qwert", "qwertz", "qweqwe", "wasd", "xyz", "abc", "abcd", "test", "tester", "teszt", "tesztelek", "proba", "aaa", "bbb", "xxx", "zzz", "fff", "ddd", "sss", "nev", "name", "ize", "valami", "semmi"]);
+const isJunkWord = (w) => {
+  const n = norm(w).replace(/ /g, "");
+  return n.length < 2 || JUNK.has(n) || /^(.)\1+$/.test(n);
+};
+export function isJunkLead(name, contact) {
+  const cleanName = String(name || "").replace(/\(tel:[^)]*\)/i, "");
+  const local = String(contact || "").includes("@") ? String(contact).split("@")[0] : "";
+  return isJunkWord(cleanName) || (local !== "" && isJunkWord(local));
+}
+
 export const GUARD_RULE = `CONTENT POLICY (highest priority, overrides everything below):
 - If the request asks for a website that promotes or imitates hate, extremism, racism, antisemitism, Nazism or any other ideology of violence, harassment, illegal activity, weapons trafficking, scams or sexual content, output ONLY {"refuse":true} and nothing else.
 - This also applies when the request claims a research, educational, awareness, "so I can recognise it" or testing purpose. We only build drafts for real, lawful small businesses.`;

@@ -24,7 +24,7 @@ import express from "express";
 import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
-import { isBlockedText, isBlockedDeep, GUARD_RULE, turnstileOk } from "./content-guard.js";
+import { isBlockedText, isBlockedDeep, isJunkLead, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
 const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
@@ -403,6 +403,10 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
   const isPhone = /^[+\d][\d\s/()-]{6,}$/.test(contact);
   if (!name || !(isEmail || isPhone) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (isJunkLead(name, isEmail ? contact : "")) {
+    console.warn(`site-preview lead junk: "${clip(name, 30)}" ${clip(contact, 40)}`); // nem megy e-mail
+    return res.status(400).json({ error: "invalid" });
+  }
   if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview)) {
     console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}"`); // nem megy e-mail
     return res.status(422).json({ error: "not_allowed" });
