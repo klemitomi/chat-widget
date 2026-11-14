@@ -15,7 +15,7 @@
 //   LEAD_TO             opcionális, alapból info@klementforge.com
 //   SITE_PREVIEW_MOCK=1 teszt mód: nincs Anthropic- és képhívás, mintaválasz jön
 //   SITE_PREVIEW_DAILY  napi plafon az összes generálásra + módosításra (alapból 15)
-//   SITE_PREVIEW_PER_IP generálás / IP / 24 óra (legfeljebb 3, env csak csökkenteni tud; minden próbálkozás számít)
+//   SITE_PREVIEW_PER_IP generálás / IP / 24 óra (legfeljebb 3, env csak csökkenteni tud; csak a sikeres kérés számít, a hibás/elutasított külön, 20-as plafonnal)
 //   SITE_PREVIEW_REFINE_PER_IP  módosítás / IP / 24 óra (legfeljebb 3, env csak csökkenteni tud)
 //   TURNSTILE_SECRET    opcionális: Cloudflare Turnstile secret. Ha be van állítva, a generálás és a lead
 //                       csak érvényes "turnstileToken" mezővel megy át (a frontendnek küldenie kell)
@@ -42,14 +42,21 @@ const ipOf = clientIp;
 const ipTag = (req) => createHash("sha256").update(String(ipOf(req))).digest("hex").slice(0, 8);
 const capAtThree = (v, fallback = 3) => Math.max(1, Math.min(3, Number(v) || fallback));
 const previewLeadDaily = dailyLimiter(Number(process.env.PREVIEW_LEAD_DAILY_MAX || 30));
+const MAX_FAILS = 20; // elutasított/hibás kérések plafonja IP-nként az ablakban (ezek nem fogyasztják a sikeres keretet)
+// Csak ELLENŐRZ: a keretet a sikeres kérés végén a req.countHit() fogyasztja, a hibásakat a req.countFail() külön számolja.
+// Így egy böngészőhiba vagy elutasított kérés nem zárja ki a valódi látogatót, a próbálgatás viszont korlátozott marad.
 function limitPerIp(max, windowMs, bucket) {
   return (req, res, next) => {
-    const key = `${bucket}:${ipOf(req)}`;
+    const ip = ipOf(req);
+    const okKey = `${bucket}:${ip}`;
+    const failKey = `${bucket}:fail:${ip}`;
     const now = Date.now();
-    const list = (perIp.get(key) || []).filter((t) => now - t < windowMs);
-    if (list.length >= max) return res.status(429).json({ error: "rate_limited" });
-    list.push(now);
-    perIp.set(key, list);
+    const recent = (key) => (perIp.get(key) || []).filter((t) => now - t < windowMs);
+    const oks = recent(okKey);
+    const fails = recent(failKey);
+    if (oks.length >= max || fails.length >= MAX_FAILS) return res.status(429).json({ error: "rate_limited" });
+    req.countHit = () => perIp.set(okKey, [...recent(okKey), Date.now()]);
+    req.countFail = () => perIp.set(failKey, [...recent(failKey), Date.now()]);
     next();
   };
 }
@@ -324,32 +331,36 @@ const useMock = () => process.env.SITE_PREVIEW_MOCK === "1" || !process.env.ANTH
 router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_IP), 24 * 60 * 60 * 1000, "sp"), async (req, res) => {
   const b = req.body || {};
   // Honeypot: ha a rejtett mező ki van töltve, robot — csendben eldobjuk
-  if (b.website) return res.status(400).json({ error: "trade_required" });
+  if (b.website) { req.countFail(); return res.status(400).json({ error: "trade_required" }); }
   const lang = b.language === "en" ? "en" : "hu";
   const input = { trade: clip(b.trade, 120).trim(), city: clip(b.city, 60).trim(), company: clip(b.company, 60).trim() };
-  if (input.trade.length < 3) return res.status(400).json({ error: "trade_required" });
+  if (input.trade.length < 3) { req.countFail(); return res.status(400).json({ error: "trade_required" }); }
   if (isBlockedText(input.trade, input.city, input.company) || isInjectionAttempt(input.trade, input.company) || isLegalTell(input.trade, input.company)) {
     console.warn(`site-preview blocked: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
+    req.countFail();
     return res.status(422).json({ error: "not_allowed" });
   }
-  if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
+  if (!(await turnstileOk(req))) { req.countFail(); return res.status(403).json({ error: "captcha_failed" }); }
 
-  if (useMock()) return res.json({ preview: mockPreview(input, lang), image: null, gallery: [], live: false });
+  if (useMock()) { req.countHit(); return res.json({ preview: mockPreview(input, lang), image: null, gallery: [], live: false }); }
 
   dailyCap(req, res, async () => {
     try {
       const raw = await askModel(systemPrompt(lang), userPrompt(input), 2200);
       if (raw?.refuse === true) {
         console.warn(`site-preview refused by model: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
+        req.countHit();
         return res.status(422).json({ error: "not_allowed" });
       }
       const preview = sanitize(raw, input);
       if (!complete(preview)) throw new Error("incomplete");
       const { image, gallery } = await findImages(preview);
       console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0} ip=${ipTag(req)}`);
+      req.countHit();
       res.json({ preview, image, gallery, live: true });
     } catch (e) {
       console.error("site-preview error", e.message, `ip=${ipTag(req)}`);
+      req.countFail();
       res.status(502).json({ error: "ai_unavailable" });
     }
   });
@@ -357,17 +368,19 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
 
 router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVIEW_REFINE_PER_IP), 24 * 60 * 60 * 1000, "spr"), async (req, res) => {
   const b = req.body || {};
-  if (b.website) return res.status(400).json({ error: "invalid" });
+  if (b.website) { req.countFail(); return res.status(400).json({ error: "invalid" }); }
   const lang = b.language === "en" ? "en" : "hu";
   const instruction = clip(b.instruction, 300).trim();
   const current = sanitize(b.preview || {}, { trade: b.preview?.trade, city: b.preview?.city, company: "" });
-  if (instruction.length < 3 || !current.hero.title) return res.status(400).json({ error: "invalid" });
+  if (instruction.length < 3 || !current.hero.title) { req.countFail(); return res.status(400).json({ error: "invalid" }); }
   if (isBlockedText(instruction, current.trade, current.city) || isBlockedDeep(current) || isInjectionAttempt(instruction) || isLegalTell(instruction)) {
     console.warn(`site-preview refine blocked: "${instruction.slice(0, 60)}" ip=${ipTag(req)}`);
+    req.countFail();
     return res.status(422).json({ error: "not_allowed" });
   }
 
   if (useMock()) {
+    req.countHit();
     const next = { ...current, hero: { ...current.hero, subtitle: `${current.hero.subtitle} (${instruction})`.slice(0, 240) } };
     return res.json({ preview: next, image: null, gallery: null, note: lang === "en" ? "Sample change (test mode)." : "Minta módosítás (teszt mód).", live: false });
   }
@@ -380,7 +393,7 @@ router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVI
         `Trade: ${trade}${city ? `\nTown: ${city}` : ""}\nCurrent draft JSON:\n${JSON.stringify(content)}\n\nOwner's request: ${instruction}`,
         2400,
       );
-      if (raw?.refuse === true) return res.status(422).json({ error: "not_allowed" });
+      if (raw?.refuse === true) { req.countHit(); return res.status(422).json({ error: "not_allowed" }); }
       const preview = sanitize(raw, { trade, city, company: "" });
       if (!complete(preview)) throw new Error("incomplete");
       const hero = raw.newImage === true || preview.imageQuery !== current.imageQuery;
@@ -388,9 +401,11 @@ router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVI
       const excludeIds = (Array.isArray(b.currentImageIds) ? b.currentImageIds : []).slice(0, 8).map((x) => clip(x, 40));
       const imgs = hero || gallery ? await findImages(preview, { hero, gallery, excludeIds }) : { image: null, gallery: null };
       console.log(`site-preview refine ok: "${trade}" hero=${hero} gallery=${gallery} ip=${ipTag(req)}`);
+      req.countHit();
       res.json({ preview, image: imgs.image, gallery: imgs.gallery, note: clip(typeof raw.note === "string" ? raw.note : "", 200), live: true });
     } catch (e) {
       console.error("site-preview refine error", e.message);
+      req.countFail();
       res.status(502).json({ error: "ai_unavailable" });
     }
   });
@@ -401,22 +416,24 @@ const esc = (v, n = 400) => clip(v, n).replace(/[&<>"]/g, (c) => ({ "&": "&amp;"
 
 router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (req, res) => {
   const b = req.body || {};
-  if (b.website) return res.json({ ok: true }); // honeypot: robotnak "siker", de nem küldünk semmit
+  if (b.website) { req.countFail(); return res.json({ ok: true }); } // honeypot: robotnak "siker", de nem küldünk semmit
   const name = clip(b.name, 80).trim();
   const contact = clip(b.contact, 120).trim();
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact);
   const isPhone = /^[+\d][\d\s/()-]{6,}$/.test(contact);
-  if (!name || !(isEmail || isPhone) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (!name || !(isEmail || isPhone) || b.consent !== true) { req.countFail(); return res.status(400).json({ error: "invalid" }); }
   if (isJunkLead(name, isEmail ? contact : "")) {
     console.warn(`site-preview lead junk: "${clip(name, 30)}" ${clip(contact, 40)} ip=${ipTag(req)}`); // nem megy e-mail
+    req.countFail();
     return res.status(400).json({ error: "invalid" });
   }
   if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview) || isInjectionAttempt(b.trade, b.company) || isLegalTell(b.trade, b.company)) {
     console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}" ip=${ipTag(req)}`); // nem megy e-mail
+    req.countFail();
     return res.status(422).json({ error: "not_allowed" });
   }
-  if (!(await turnstileOk(req))) return res.status(403).json({ error: "captcha_failed" });
-  if (isEmail && !(await emailDomainOk(contact))) return res.status(400).json({ error: "invalid_email" });
+  if (!(await turnstileOk(req))) { req.countFail(); return res.status(403).json({ error: "captcha_failed" }); }
+  if (isEmail && !(await emailDomainOk(contact))) { req.countFail(); return res.status(400).json({ error: "invalid_email" }); }
   if (!previewLeadDaily()) return res.status(429).json({ error: "daily_limit" });
 
   const p = b.preview || {};
@@ -443,6 +460,7 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
       }),
     });
     if (!r.ok) throw new Error(await r.text());
+    req.countHit();
     res.json({ ok: true });
   } catch (e) {
     console.error("site-preview lead error", e.message);
