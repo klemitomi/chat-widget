@@ -99,7 +99,10 @@ export async function turnstileOk(req) {
   if (!secret) return true; // nincs bekapcsolva
   const b = req.body || {};
   const token = String(b.turnstileToken || b["cf-turnstile-response"] || "").slice(0, 2048);
-  if (!token) return false;
+  if (!token) {
+    console.warn("turnstile: nem érkezett token a kéréssel");
+    return false;
+  }
   try {
     const body = new URLSearchParams({ secret, response: token });
     const ip = req.headers["cf-connecting-ip"];
@@ -110,6 +113,7 @@ export async function turnstileOk(req) {
       signal: AbortSignal.timeout(4000),
     });
     const data = await r.json();
+    if (data.success !== true) console.warn(`turnstile elutasítva: ${(data["error-codes"] || []).join(",") || "?"} host=${data.hostname || "?"}`);
     return data.success === true;
   } catch (e) {
     console.warn("turnstile error:", e.message);
