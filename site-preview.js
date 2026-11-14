@@ -313,7 +313,8 @@ function mockPreview(input, lang) {
 }
 
 // ---- Közös Anthropic-hívás ---------------------------------------------------
-async function askModel(system, content, maxTokens) {
+// A modell néha hibás JSON-t ad (pl. idézőjel a szövegben): ilyenkor egyszer újrakérjük, a látogató nem veszi észre.
+async function askModelOnce(system, content, maxTokens) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
@@ -324,6 +325,17 @@ async function askModel(system, content, maxTokens) {
   if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
   return parseJson(data.content.filter((c) => c.type === "text").map((c) => c.text).join(""));
 }
+const isParseError = (e) => e instanceof SyntaxError || e?.message === "bad_json";
+async function askModel(system, content, maxTokens) {
+  try {
+    return await askModelOnce(system, content, maxTokens);
+  } catch (e) {
+    if (!isParseError(e)) throw e;
+    console.warn("site-preview: hibás JSON a modelltől, újrapróbálom:", e.message.slice(0, 80));
+    return askModelOnce(system, content, maxTokens);
+  }
+}
+
 // ---- Valós foglalkozás ellenőrzése -------------------------------------------
 // Gyors, olcsó modellhívás: a "tevékenység" mezőbe csak létező foglalkozás / vállalkozói tevékenység mehet.
 // Az eredményt memóriában tartjuk (a lead és a generálás ugyanarra a szövegre csak egyszer hív). Hiba esetén átenged (nem akadályozza a valódi látogatót).
