@@ -25,7 +25,7 @@ import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
 import { createHash } from "node:crypto";
-import { guardLimit, guardDaily, dailyOk, emailPolicy, noteEmail, speedOk, addLead, confirmUrl, sendResend, leadFlowRouter, persistent } from "./abuse-guard.js";
+import { guardLimit, guardDaily, dailyOk, requireLead, emailPolicy, noteEmail, speedOk, addLead, confirmUrl, sendResend, leadFlowRouter, persistent } from "./abuse-guard.js";
 import { isBlockedText, isBlockedDeep, isJunkLead, isGibberishEmail, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
@@ -347,7 +347,7 @@ const complete = (p) => p.hero.title && p.services.length >= 3 && p.process.leng
 const useMock = () => process.env.SITE_PREVIEW_MOCK === "1" || !process.env.ANTHROPIC_API_KEY;
 
 // ---- Végpontok -------------------------------------------------------------
-router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_IP), 24 * 60 * 60 * 1000, "sp"), async (req, res) => {
+router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_IP), 24 * 60 * 60 * 1000, "sp"), requireLead({ bucket: "gen", max: Number(process.env.GEN_PER_LEAD || 3) }), async (req, res) => {
   const b = req.body || {};
   // Honeypot: ha a rejtett mező ki van töltve, robot — csendben eldobjuk
   if (b.website) { req.countFail(); return res.status(400).json({ error: "trade_required" }); }
@@ -390,7 +390,7 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
   });
 });
 
-router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVIEW_REFINE_PER_IP), 24 * 60 * 60 * 1000, "spr"), async (req, res) => {
+router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVIEW_REFINE_PER_IP), 24 * 60 * 60 * 1000, "spr"), requireLead({ bucket: "genr", max: 10 }), async (req, res) => {
   const b = req.body || {};
   if (b.website) { req.countFail(); return res.status(400).json({ error: "invalid" }); }
   const lang = b.language === "en" ? "en" : "hu";
@@ -480,14 +480,11 @@ async function sendConfirmMail(email, name, id, lang) {
 }
 async function onGateConfirmed(row) {
   const p = row.payload || {};
+  if (p.marketingConsent !== true) { console.log("site-preview gate lead confirmed (no marketing consent: not emailed)"); return; }
   await sendLeadMail({ ...p, source: `${p.source || ""} — e-mail MEGERŐSÍTVE` }, row.name, row.email, true, {});
   console.log("site-preview gate lead confirmed and emailed");
 }
-const hu = (d) => new Date(d).toLocaleString("hu-HU", { timeZone: "Europe/Budapest" });
-function renderGateDigest(rows) {
-  const tr = rows.map((r) => { const p = r.payload || {}; return `<tr><td>${esc(r.name, 60)}</td><td>${esc(p.contact || r.email, 80)}</td><td>${esc(p.trade, 80)}${p.city ? `, ${esc(p.city, 40)}` : ""}</td><td>${esc(hu(r.created_at), 40)}</td></tr>`; }).join("");
-  return { subject: `Napi összesítő: ${rows.length} megerősítetlen weboldal-előnézet belépő`, html: `<p>Ők kipróbálták a generátort, hozzájárultak a megkereséshez, de az e-mailjüket nem erősítették meg (vagy csak telefonszámot adtak). Valós érdeklődőt a megerősítésük után azonnal jelzek külön.</p><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><th>Név</th><th>Elérhetőség</th><th>Tevékenység</th><th>Mikor</th></tr>${tr}</table>` };
-}
+function renderGateDigest() { return null; } // a meg nem erősítettek nem érdekesek: nincs napi összesítő
 router.use(leadFlowRouter({ onConfirmed: onGateConfirmed, renderDigest: renderGateDigest }));
 
 router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (req, res) => {
@@ -534,20 +531,20 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     return res.status(422).json({ error: "not_allowed" });
   }
   if (String(b.source || "").includes("generátor-kapu")) {
-    if (b.marketingConsent !== true) {
-      console.log(`site-preview gate lead without marketing consent: not emailed ip=${ipTag(req)}`);
-    } else {
-      if (isEmail) await noteEmail(contact);
-      const payload = { trade: clip(b.trade, 120), city: clip(b.city, 60), company: clip(b.company, 60), language: b.language === "en" ? "en" : "hu", source: clip(b.source, 300), marketingConsent: true, contact, isEmail };
-      const id = await addLead({ email: isEmail ? contact : null, name, source: payload.source, payload });
-      // a megerősítő levél idegen címre megy: napi plafon; ha betelt, a belépő a napi összesítőben marad
-      if (id && isEmail && (await dailyOk("confirm-mail", CONFIRM_MAIL_MAX))) {
-        sendConfirmMail(contact, name, id, payload.language).catch((e) => console.error("confirm mail error", e.message));
-      }
-      if (!id) console.warn(`site-preview gate lead not stored (store unavailable) ip=${ipTag(req)}`);
+    // A generálás csak megerősített e-mail címmel indul: e-mail kötelező, a megerősítő linkre kattintás után kap jogot a generálásra.
+    if (!isEmail) { req.countFail(); return res.status(400).json({ error: "invalid" }); }
+    await noteEmail(contact);
+    const payload = { trade: clip(b.trade, 120), city: clip(b.city, 60), company: clip(b.company, 60), language: b.language === "en" ? "en" : "hu", source: clip(b.source, 300), marketingConsent: b.marketingConsent === true, contact, isEmail };
+    const id = await addLead({ email: contact, name, source: payload.source, payload });
+    if (!id) return res.status(503).json({ error: "unavailable" });
+    if (!(await dailyOk("confirm-mail", CONFIRM_MAIL_MAX))) return res.status(429).json({ error: "daily_limit" });
+    try { await sendConfirmMail(contact, name, id, payload.language); } catch (e) {
+      console.error("confirm mail error", e.message);
+      return res.status(502).json({ error: "mail_failed" });
     }
+    console.log(`site-preview gate: confirmation mail sent ip=${ipTag(req)}`);
     req.countHit();
-    return res.json({ ok: true });
+    return res.json({ ok: true, leadId: id });
   }
   if (!previewLeadDaily()) return res.status(429).json({ error: "daily_limit" });
 

@@ -149,6 +149,35 @@ export async function addLead({ email, name, source, payload }) {
   } catch (e) { warnOnce(e); return null; }
 }
 
+// Megerősített-e a belépő (a generálás csak megerősített címmel indulhat). Csak a "igen" válaszokat tároljuk.
+const confirmedCache = new Map();
+export async function leadConfirmed(id) {
+  id = String(id || "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return false;
+  if (confirmedCache.has(id)) return true;
+  try {
+    const ok = (await rpc("guard_lead_status", { p_id: id })) === true;
+    if (ok) { if (confirmedCache.size > 5000) confirmedCache.clear(); confirmedCache.set(id, 1); }
+    return ok;
+  } catch (e) { warnOnce(e); return false; }
+}
+
+// Middleware: a kérés csak megerősített belépő (leadId) mellett mehet tovább; belépőnként napi kvótával.
+export function requireLead({ bucket, max, windowSec = 86400 }) {
+  return async (req, res, next) => {
+    try {
+      if (!persistent || process.env.GATE_REQUIRED === "0") return next();
+      const id = String(req.body?.leadId || "");
+      if (!(await leadConfirmed(id))) return res.status(403).json({ error: "confirm_required" });
+      const k = h(id);
+      if ((await count(bucket, k, windowSec)) >= max) return res.status(429).json({ error: "rate_limited" });
+      const orig = req.countHit;
+      req.countHit = async () => { await Promise.all([orig?.(), hit(bucket, k)]); };
+      next();
+    } catch (e) { next(e); }
+  };
+}
+
 export async function sendResend(payload) {
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -168,7 +197,7 @@ export function leadFlowRouter({ onConfirmed, renderDigest }) {
     res.set("Cache-Control", "no-store");
     if (!sigOk(id, sig)) return res.status(400).send(page("Érvénytelen link", "<h1>Érvénytelen link</h1><p>A megerősítő link hibás vagy lejárt.</p>"));
     // Szándékosan külön gombnyomás kell: a levélszkennerek is megnyitják a linkeket, de nem nyomnak gombot.
-    res.send(page("Megerősítés", `<h1>Megerősítés</h1><p>Köszönöm! Nyomd meg a gombot, és megkeresem az ötletemmel.</p><form method="post" action="/api/lead/confirm"><input type="hidden" name="id" value="${id.replace(/[^a-f0-9-]/gi, "")}"><input type="hidden" name="sig" value="${sig.replace(/[^a-f0-9]/gi, "")}"><button>Megerősítem</button></form>`));
+    res.send(page("Megerősítés", `<h1>Megerősítés</h1><p>Köszönöm! Nyomd meg a gombot, és a weboldal-előnézet generálása elindul.</p><form method="post" action="/api/lead/confirm"><input type="hidden" name="id" value="${id.replace(/[^a-f0-9-]/gi, "")}"><input type="hidden" name="sig" value="${sig.replace(/[^a-f0-9]/gi, "")}"><button>Megerősítem</button></form>`));
   });
   r.post("/lead/confirm", express.urlencoded({ extended: false, limit: "2kb" }), async (req, res) => {
     const id = String(req.body?.id || ""), sig = String(req.body?.sig || "");
@@ -178,7 +207,18 @@ export function leadFlowRouter({ onConfirmed, renderDigest }) {
       const row = persistent ? await rpc("guard_lead_confirm", { p_id: id }) : null;
       if (row) await onConfirmed(row).catch((e) => console.error("lead confirmed mail error", e.message));
     } catch (e) { warnOnce(e); }
-    res.send(page("Köszönöm", "<h1>Köszönöm, megvan!</h1><p>Hamarosan jelentkezem.</p><p><a href=\"https://klementforge.com\">klementforge.com</a></p>"));
+    res.send(page("Köszönöm", "<h1>Köszönöm, megvan!</h1><p>Térj vissza a generátor oldalára: az előnézet pár másodpercen belül elindul.</p><p><a href=\"https://klementforge.com\">klementforge.com</a></p>"));
+  });
+  // A kapu ezt kérdezgeti, amíg a látogató meg nem erősíti az e-mailjét (más eszközön is megerősíthet)
+  const polls = new Map();
+  r.get("/lead/status", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const ip = clientIp(req), now = Date.now();
+    const recent = (polls.get(ip) || []).filter((t) => now - t < 3600000);
+    if (recent.length >= 600) return res.status(429).json({ error: "rate_limited" });
+    if (polls.size > 5000) polls.clear();
+    polls.set(ip, [...recent, now]);
+    res.json({ confirmed: await leadConfirmed(req.query.id) });
   });
   // Napi összesítő: a Supabase pg_cron hívja (x-internal-key fejléccel)
   r.post("/internal/digest", async (req, res) => {
