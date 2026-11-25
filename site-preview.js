@@ -290,6 +290,29 @@ function mockPreview(input, lang) {
 
 // ---- Közös Anthropic-hívás ---------------------------------------------------
 // A modell néha hibás JSON-t ad (pl. idézőjel a szövegben): ilyenkor egyszer újrakérjük, a látogató nem veszi észre.
+const str = { type: "string" };
+const pair = { type: "object", properties: { title: str, text: str }, additionalProperties: true };
+// A kötelező eszközhívás szerkezete (megegyezik a sanitize() által várt vázlattal); minden mező opcionális, hogy az elutasítás ({"refuse":true}) is átférjen
+const RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    refuse: { type: "boolean" }, template: { type: "string", enum: TEMPLATES }, accent: { type: "string", enum: ACCENTS }, brand: str,
+    hero: { type: "object", properties: { eyebrow: str, title: str, subtitle: str, cta: str }, additionalProperties: true },
+    services: { type: "array", items: { type: "object", properties: { title: str, text: str, icon: { type: "string", enum: ICONS } }, additionalProperties: true } },
+    statement: pair,
+    process: { type: "array", items: pair },
+    why: { type: "array", items: str },
+    about: str, contactTitle: str, contactCta: str, imageQuery: str, galleryQuery: str,
+    newImage: { type: "boolean" }, newGallery: { type: "boolean" }, note: str,
+  },
+  additionalProperties: true,
+};
+// Ha a modell az egész vázlatot egyetlen kulcs alá csomagolta, kibontjuk
+const unwrap = (o) => {
+  if (!o || o.hero || o.refuse) return o;
+  const inner = Object.values(o).find((v) => v && typeof v === "object" && !Array.isArray(v) && (v.hero || v.refuse));
+  return inner || o;
+};
 let noTools = false; // ha az API elutasítaná a kötelező eszközhívást, szöveges módra váltunk
 async function askModelOnce(system, content, maxTokens) {
   // Kötelező eszközhívás: a modell így szerkezetileg érvényes JSON-t ad (nincs "hibás JSON" a szövegben lévő idézőjelek miatt)
@@ -299,7 +322,7 @@ async function askModelOnce(system, content, maxTokens) {
     body: JSON.stringify({
       model: MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content }],
       ...(noTools ? {} : {
-        tools: [{ name: "submit_result", description: "Submit the result object exactly as described in the instructions (or {\"refuse\":true}).", input_schema: { type: "object", additionalProperties: true } }],
+        tools: [{ name: "submit_result", description: "Submit the result object exactly as described in the instructions (or {\"refuse\":true}).", input_schema: RESULT_SCHEMA }],
         tool_choice: { type: "tool", name: "submit_result" },
       }),
     }),
@@ -314,7 +337,7 @@ async function askModelOnce(system, content, maxTokens) {
   if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
   if (data.stop_reason === "max_tokens") throw new Error("bad_json"); // csonka válasz: újrapróbáljuk
   const tool = data.content.find((c) => c.type === "tool_use");
-  if (tool?.input && typeof tool.input === "object") return tool.input;
+  if (tool?.input && typeof tool.input === "object") return unwrap(tool.input);
   return parseJson(data.content.filter((c) => c.type === "text").map((c) => c.text).join(""));
 }
 const isParseError = (e) => e instanceof SyntaxError || e?.message === "bad_json";
@@ -387,14 +410,22 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
 
   dailyCap(req, res, async () => {
     try {
-      const raw = await askModel(systemPrompt(lang), userPrompt(input), 2200);
+      // Ha a modell hiányos vázlatot ad (pl. kevés szolgáltatás), egyszer automatikusan újrapróbáljuk
+      let raw, preview;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        raw = await askModel(systemPrompt(lang), userPrompt(input), 2200);
+        if (raw?.refuse === true) break;
+        preview = sanitize(raw, input);
+        if (complete(preview)) break;
+        console.warn(`site-preview: hiányos vázlat, újrapróbálom (services=${preview.services.length} process=${preview.process.length} hero=${Boolean(preview.hero.title)})`);
+        preview = null;
+      }
       if (raw?.refuse === true) {
         console.warn(`site-preview refused by model: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
         req.countHit();
         return res.status(422).json({ error: "not_allowed" });
       }
-      const preview = sanitize(raw, input);
-      if (!complete(preview)) throw new Error("incomplete");
+      if (!preview) throw new Error("incomplete");
       const { image, gallery } = await findImages(preview);
       console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0} ip=${ipTag(req)}`);
       req.countHit();
