@@ -120,3 +120,12 @@ export async function turnstileOk(req) {
     return true; // hálózati hiba: inkább átengedjük (a tiltólista és a limitek így is védenek)
   }
 }
+
+// Kamu e-mail: hosszú, magánhangzó nélküli betűhalmaz a @ előtt (pl. "mbbdpbolwupplrhghy@..."). Valódi címek ritkán ilyenek.
+export function isGibberishEmail(email) {
+  const local = String(email || "").split("@")[0].toLowerCase().replace(/[^a-z]/g, "");
+  if (local.length < 10) return false;
+  const vowels = (local.match(/[aeiouy]/g) || []).length;
+  const longestConsonantRun = Math.max(0, ...(local.match(/[^aeiouy]+/g) || []).map((x) => x.length));
+  return vowels / local.length < 0.2 || longestConsonantRun >= 6;
+}

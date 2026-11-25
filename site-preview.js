@@ -25,7 +25,7 @@ import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
 import { createHash } from "node:crypto";
-import { isBlockedText, isBlockedDeep, isJunkLead, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
+import { isBlockedText, isBlockedDeep, isJunkLead, isGibberishEmail, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
 const MODEL = process.env.SITE_PREVIEW_MODEL || "claude-sonnet-5";
@@ -405,6 +405,7 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
       const { image, gallery } = await findImages(preview);
       console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0} ip=${ipTag(req)}`);
       req.countHit();
+      flushGateLead(req, preview).catch(() => {});
       res.json({ preview, image, gallery, live: true });
     } catch (e) {
       console.error("site-preview error", e.message, `ip=${ipTag(req)}`);
@@ -462,6 +463,54 @@ router.post("/site-preview/refine", limitPerIp(capAtThree(process.env.SITE_PREVI
 const esc = (v, n = 400) => clip(v, n).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 
+// ---- Lead e-mail Tamásnak -----------------------------------------------------
+async function sendLeadMail(b, name, contact, isEmail, p) {
+  const li = (arr, f) => (Array.isArray(arr) ? arr : []).slice(0, 6).map(f).join("");
+  const html = `<p><b>${esc(name)}</b> — ${esc(contact)}</p>
+<p>Tevékenység: <b>${esc(b.trade, 120)}</b>${b.city ? `, ${esc(b.city, 60)}` : ""}${b.company ? ` (${esc(b.company, 60)})` : ""}</p>
+<p>Nyelv: ${b.language === "en" ? "angol" : "magyar"}</p>
+${b.source ? `<p><small>${esc(b.source, 300)}</small></p>` : ""}${b.marketingConsent === true ? "<p><b>Egyszeri megkereséshez HOZZÁJÁRULT</b> (legfeljebb 1 személyre szabott ötlet/ajánlat e-mailben).</p>" : ""}
+<hr><p><b>Generált vázlat</b> (sablon: ${esc(p.template, 20)}, szín: ${esc(p.accent, 20)})</p>
+<p><small>${esc(p.hero?.eyebrow, 80)}</small><br><b>${esc(p.hero?.title, 90)}</b><br>${esc(p.hero?.subtitle, 240)}</p>
+<p><b>Szolgáltatások</b></p><ul>${li(p.services, (x) => `<li><b>${esc(x?.title, 60)}</b>: ${esc(x?.text, 200)}</li>`)}</ul>
+<p><b>${esc(p.statement?.title, 80)}</b> ${esc(p.statement?.text, 180)}</p>
+<p><b>Folyamat</b></p><ol>${li(p.process, (x) => `<li><b>${esc(x?.title, 40)}</b>: ${esc(x?.text, 140)}</li>`)}</ol>
+<p><b>Rólunk:</b> ${esc(p.about, 360)}</p>`;
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: "KlementForge weboldal-előnézet <ai@klementforge.com>",
+      to: process.env.LEAD_TO || "info@klementforge.com",
+      ...(isEmail ? { reply_to: contact } : {}),
+      subject: `Új weboldal-előnézet lead: ${clip(b.company || b.trade, 60)} (${clip(name, 40)})`,
+      html,
+    }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+// A generátor-kapu belépését csak akkor jelezzük Tamásnak, ha a látogató hozzájárult a megkereséshez ÉS tényleg elkészült a vázlata.
+// Addig a kapu adata a memóriában vár (IP szerint, 2 óráig), így a kamu / félbehagyott belépések nem küldenek levelet.
+const pendingGateLeads = new Map();
+function holdGateLead(req, lead) {
+  if (pendingGateLeads.size > 500) pendingGateLeads.clear();
+  pendingGateLeads.set(ipOf(req), { ...lead, at: Date.now() });
+}
+async function flushGateLead(req, preview) {
+  const key = ipOf(req);
+  const h = pendingGateLeads.get(key);
+  if (!h) return;
+  pendingGateLeads.delete(key);
+  if (Date.now() - h.at > 2 * 60 * 60 * 1000 || !previewLeadDaily()) return;
+  try {
+    await sendLeadMail(h.b, h.name, h.contact, h.isEmail, preview);
+    console.log(`site-preview gate lead emailed after draft ip=${ipTag(req)}`);
+  } catch (e) {
+    console.error("site-preview gate lead mail error", e.message);
+  }
+}
+
 router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (req, res) => {
   const b = req.body || {};
   if (b.website) { req.countFail(); return res.json({ ok: true }); } // honeypot: robotnak "siker", de nem küldünk semmit
@@ -475,6 +524,11 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     req.countFail();
     return res.status(400).json({ error: "invalid" });
   }
+  if (isEmail && isGibberishEmail(contact)) {
+    console.warn(`site-preview lead gibberish email: ${clip(contact, 40)} ip=${ipTag(req)}`); // nem megy e-mail
+    req.countFail();
+    return res.status(400).json({ error: "invalid_email" });
+  }
   if (isBlockedText(name, b.trade, b.city, b.company) || isBlockedDeep(b.preview) || isInjectionAttempt(b.trade, b.company) || isLegalTell(b.trade, b.company)) {
     console.warn(`site-preview lead blocked: "${clip(b.trade, 60)}" ip=${ipTag(req)}`); // nem megy e-mail
     req.countFail();
@@ -487,32 +541,19 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     req.countFail();
     return res.status(422).json({ error: "not_allowed" });
   }
+  if (String(b.source || "").includes("generátor-kapu")) {
+    if (b.marketingConsent !== true) {
+      console.log(`site-preview gate lead without marketing consent: not emailed ip=${ipTag(req)}`);
+    } else {
+      holdGateLead(req, { name, contact, isEmail, b: { trade: b.trade, city: b.city, company: b.company, language: b.language, source: b.source, marketingConsent: true } });
+    }
+    req.countHit();
+    return res.json({ ok: true });
+  }
   if (!previewLeadDaily()) return res.status(429).json({ error: "daily_limit" });
 
-  const p = b.preview || {};
-  const li = (arr, f) => (Array.isArray(arr) ? arr : []).slice(0, 6).map(f).join("");
-  const html = `<p><b>${esc(name)}</b> — ${esc(contact)}</p>
-<p>Tevékenység: <b>${esc(b.trade, 120)}</b>${b.city ? `, ${esc(b.city, 60)}` : ""}${b.company ? ` (${esc(b.company, 60)})` : ""}</p>
-<p>Nyelv: ${b.language === "en" ? "angol" : "magyar"}</p>
-<hr><p><b>Generált vázlat</b> (sablon: ${esc(p.template, 20)}, szín: ${esc(p.accent, 20)})</p>
-<p><small>${esc(p.hero?.eyebrow, 80)}</small><br><b>${esc(p.hero?.title, 90)}</b><br>${esc(p.hero?.subtitle, 240)}</p>
-<p><b>Szolgáltatások</b></p><ul>${li(p.services, (x) => `<li><b>${esc(x?.title, 60)}</b>: ${esc(x?.text, 200)}</li>`)}</ul>
-<p><b>${esc(p.statement?.title, 80)}</b> ${esc(p.statement?.text, 180)}</p>
-<p><b>Folyamat</b></p><ol>${li(p.process, (x) => `<li><b>${esc(x?.title, 40)}</b>: ${esc(x?.text, 140)}</li>`)}</ol>
-<p><b>Rólunk:</b> ${esc(p.about, 360)}</p>`;
   try {
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: "KlementForge weboldal-előnézet <ai@klementforge.com>",
-        to: process.env.LEAD_TO || "info@klementforge.com",
-        ...(isEmail ? { reply_to: contact } : {}),
-        subject: `Új weboldal-előnézet lead: ${clip(b.company || b.trade, 60)} (${clip(name, 40)})`,
-        html,
-      }),
-    });
-    if (!r.ok) throw new Error(await r.text());
+    await sendLeadMail(b, name, contact, isEmail, b.preview || {});
     req.countHit();
     res.json({ ok: true });
   } catch (e) {
