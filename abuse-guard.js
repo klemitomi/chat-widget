@@ -185,6 +185,7 @@ export function requireLead({ bucket, max, windowSec = 86400 }) {
       if (!(await leadConfirmed(id))) return res.status(403).json({ error: "confirm_required" });
       const k = h(id);
       if ((await count(bucket, k, windowSec)) >= max) return res.status(429).json({ error: "rate_limited" });
+      req.leadVerified = true;
       const orig = req.countHit;
       req.countHit = async () => { await Promise.all([orig?.(), hit(bucket, k)]); };
       next();

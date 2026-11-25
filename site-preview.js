@@ -290,15 +290,31 @@ function mockPreview(input, lang) {
 
 // ---- Közös Anthropic-hívás ---------------------------------------------------
 // A modell néha hibás JSON-t ad (pl. idézőjel a szövegben): ilyenkor egyszer újrakérjük, a látogató nem veszi észre.
+let noTools = false; // ha az API elutasítaná a kötelező eszközhívást, szöveges módra váltunk
 async function askModelOnce(system, content, maxTokens) {
+  // Kötelező eszközhívás: a modell így szerkezetileg érvényes JSON-t ad (nincs "hibás JSON" a szövegben lévő idézőjelek miatt)
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({
+      model: MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content }],
+      ...(noTools ? {} : {
+        tools: [{ name: "submit_result", description: "Submit the result object exactly as described in the instructions (or {\"refuse\":true}).", input_schema: { type: "object", additionalProperties: true } }],
+        tool_choice: { type: "tool", name: "submit_result" },
+      }),
+    }),
     signal: AbortSignal.timeout(60000),
   });
   const data = await r.json();
+  if (!data.content && !noTools && /tool/i.test(JSON.stringify(data.error || ""))) {
+    console.warn("site-preview: az eszközhívás nem támogatott, szöveges módra váltok:", JSON.stringify(data.error).slice(0, 200));
+    noTools = true;
+    return askModelOnce(system, content, maxTokens);
+  }
   if (!data.content) throw new Error(JSON.stringify(data).slice(0, 300));
+  if (data.stop_reason === "max_tokens") throw new Error("bad_json"); // csonka válasz: újrapróbáljuk
+  const tool = data.content.find((c) => c.type === "tool_use");
+  if (tool?.input && typeof tool.input === "object") return tool.input;
   return parseJson(data.content.filter((c) => c.type === "text").map((c) => c.text).join(""));
 }
 const isParseError = (e) => e instanceof SyntaxError || e?.message === "bad_json";
@@ -359,7 +375,8 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
     req.countFail();
     return res.status(422).json({ error: "not_allowed" });
   }
-  if (!(await turnstileOk(req))) { req.countFail(); return res.status(403).json({ error: "captcha_failed" }); }
+  // A megerősített belépő (leadId) már átment a Turnstile-on a lead-végponton: itt nem kérünk újabb tokent
+  if (!req.leadVerified && !(await turnstileOk(req))) { req.countFail(); return res.status(403).json({ error: "captcha_failed" }); }
   if (!(await isRealTrade(input.trade))) {
     console.warn(`site-preview not a real trade: "${input.trade.slice(0, 60)}" ip=${ipTag(req)}`);
     req.countFail();
