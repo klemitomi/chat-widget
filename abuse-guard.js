@@ -136,6 +136,8 @@ export function speedOk(fillMs, minMs = 1500) {
 // ---- megerősítő link (aláírt) ----
 const sign = (id) => createHmac("sha256", HMAC_KEY).update(String(id)).digest("hex").slice(0, 32);
 export const confirmUrl = (id) => `${API_BASE}/api/lead/confirm?id=${encodeURIComponent(id)}&sig=${sign(id)}`;
+// A levélben a SAJÁT domainünkre mutató link megy (nem az onrender.com-ra: az rontja a levél hírnevét): az oldal hívja meg a megerősítést
+export const siteConfirmUrl = (id, base) => `${base}?kfc=${encodeURIComponent(id)}&sig=${sign(id)}`;
 const sigOk = (id, sig) => {
   if (!HMAC_KEY || !id || !sig) return false;
   const a = Buffer.from(sign(id)), b = Buffer.from(String(sig));
@@ -221,6 +223,20 @@ export function leadFlowRouter({ onConfirmed, renderDigest }) {
     const back = safeReturnUrl(info?.payload?.returnUrl);
     if (back) return res.redirect(303, `${back}?kfl=${encodeURIComponent(id)}`);
     res.send(page("Köszönöm", "<h1>Köszönöm, megvan!</h1><p>Térj vissza a generátor oldalára: az előnézet pár másodpercen belül elindul.</p><p><a href=\"https://klementforge.com\">klementforge.com</a></p>"));
+  });
+  // Az oldal hívja (a levélben lévő saját-domainű linkről): megerősít, és visszaadja a megadott adatokat
+  r.post("/lead/confirm-json", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const id = String(req.body?.id || ""), sig = String(req.body?.sig || "");
+    if (!sigOk(id, sig)) return res.status(400).json({ error: "invalid_link" });
+    try {
+      const row = persistent ? await rpc("guard_lead_confirm", { p_id: id }) : null;
+      if (row) await onConfirmed(row).catch((e) => console.error("lead confirmed mail error", e.message));
+      const info = await leadInfo(id);
+      if (!info?.confirmed) return res.status(404).json({ error: "not_found" });
+      const p = info.payload || {};
+      res.json({ confirmed: true, input: { trade: p.trade || "", city: p.city || "", company: p.company || "" } });
+    } catch (e) { warnOnce(e); res.status(502).json({ error: "store" }); }
   });
   // A kapu ezt kérdezgeti, amíg a látogató meg nem erősíti az e-mailjét (más eszközön is megerősíthet)
   const polls = new Map();

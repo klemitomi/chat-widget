@@ -25,7 +25,7 @@ import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
 import { createHash } from "node:crypto";
-import { guardLimit, guardDaily, dailyOk, requireLead, safeReturnUrl, emailPolicy, noteEmail, speedOk, addLead, confirmUrl, sendResend, leadFlowRouter, persistent } from "./abuse-guard.js";
+import { guardLimit, guardDaily, dailyOk, requireLead, safeReturnUrl, emailPolicy, noteEmail, speedOk, addLead, confirmUrl, siteConfirmUrl, sendResend, leadFlowRouter, persistent } from "./abuse-guard.js";
 import { isBlockedText, isBlockedDeep, isJunkLead, isGibberishEmail, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
@@ -515,19 +515,20 @@ ${b.source ? `<p><small>${esc(b.source, 300)}</small></p>` : ""}${b.marketingCon
 
 // ---- Generátor-kapu belépők: e-mail megerősítés (double opt-in) + napi összesítő -------------------------
 // Megerősített e-mail -> azonnali levél Tamásnak. Meg nem erősített belépő (és a csak telefonos) -> napi egy összesítő levél.
-async function sendConfirmMail(email, name, id, lang) {
+async function sendConfirmMail(email, name, id, lang, returnUrl) {
   const en = lang === "en";
+  const link = siteConfirmUrl(id, returnUrl || (en ? "https://www.klementforge.com/en/ai-szolgaltatasok" : "https://www.klementforge.com/ai-szolgaltatasok"));
   await sendResend({
     from: "Klement Tamás <ai@klementforge.com>",
     to: email,
     reply_to: "info@klementforge.com",
     subject: en ? "Your website preview: one click to start" : "A weboldal-előnézeted: egy kattintás, és indul",
     text: en
-      ? `Hi ${clip(name, 60)},\n\nYou asked for a website preview at klementforge.com. Click this link and it starts right away:\n${confirmUrl(id)}\n\nIf this was not you, just ignore this e-mail.\n\nTamás, KlementForge`
-      : `Szia ${clip(name, 60)}!\n\nWeboldal-előnézetet kértél a klementforge.com oldalon. Kattints erre a linkre, és azonnal indul:\n${confirmUrl(id)}\n\nHa nem te voltál, hagyd figyelmen kívül ezt a levelet.\n\nTamás, KlementForge`,
+      ? `Hi ${clip(name, 60)},\n\nYou asked for a website preview at klementforge.com. Click this link and it starts right away:\n${link}\n\nIf this was not you, just ignore this e-mail.\n\nTamás, KlementForge`
+      : `Szia ${clip(name, 60)}!\n\nWeboldal-előnézetet kértél a klementforge.com oldalon. Kattints erre a linkre, és azonnal indul:\n${link}\n\nHa nem te voltál, hagyd figyelmen kívül ezt a levelet.\n\nTamás, KlementForge`,
     html: en
-      ? `<p>Hi ${esc(name, 60)},</p><p>You asked for a website preview at klementforge.com. Click the link and it starts right away: <a href="${confirmUrl(id)}">start my preview</a>.</p><p>If this was not you, just ignore this e-mail — nothing will happen.</p><p>Tamás, KlementForge</p>`
-      : `<p>Szia ${esc(name, 60)}!</p><p>Weboldal-előnézetet kértél a klementforge.com oldalon. Kattints a linkre, és azonnal indul: <a href="${confirmUrl(id)}">indítom az előnézetet</a>.</p><p>Ha nem te voltál, hagyd figyelmen kívül ezt a levelet — nem történik semmi.</p><p>Tamás, KlementForge</p>`,
+      ? `<p>Hi ${esc(name, 60)},</p><p>You asked for a website preview at klementforge.com. Click the link and it starts right away: <a href="${link}">start my preview</a>.</p><p>If this was not you, just ignore this e-mail — nothing will happen.</p><p>Tamás, KlementForge</p>`
+      : `<p>Szia ${esc(name, 60)}!</p><p>Weboldal-előnézetet kértél a klementforge.com oldalon. Kattints a linkre, és azonnal indul: <a href="${link}">indítom az előnézetet</a>.</p><p>Ha nem te voltál, hagyd figyelmen kívül ezt a levelet — nem történik semmi.</p><p>Tamás, KlementForge</p>`,
   });
 }
 async function onGateConfirmed(row) {
@@ -590,7 +591,7 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     const id = await addLead({ email: contact, name, source: payload.source, payload });
     if (!id) return res.status(503).json({ error: "unavailable" });
     if (!(await dailyOk("confirm-mail", CONFIRM_MAIL_MAX))) return res.status(429).json({ error: "daily_limit" });
-    try { await sendConfirmMail(contact, name, id, payload.language); } catch (e) {
+    try { await sendConfirmMail(contact, name, id, payload.language, payload.returnUrl); } catch (e) {
       console.error("confirm mail error", e.message);
       return res.status(502).json({ error: "mail_failed" });
     }
