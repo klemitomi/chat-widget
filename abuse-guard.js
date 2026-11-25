@@ -162,6 +162,20 @@ export async function leadConfirmed(id) {
   } catch (e) { warnOnce(e); return false; }
 }
 
+export async function leadInfo(id) {
+  id = String(id || "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+  try { return await rpc("guard_lead_get", { p_id: id }); } catch (e) { warnOnce(e); return null; }
+}
+// Csak a saját oldalunkra irányítunk vissza (nyílt átirányítás ellen)
+export function safeReturnUrl(u) {
+  try {
+    const x = new URL(String(u || ""));
+    if (x.protocol !== "https:" || !["klementforge.com", "www.klementforge.com"].includes(x.hostname)) return "";
+    return x.origin + x.pathname;
+  } catch { return ""; }
+}
+
 // Middleware: a kérés csak megerősített belépő (leadId) mellett mehet tovább; belépőnként napi kvótával.
 export function requireLead({ bucket, max, windowSec = 86400 }) {
   return async (req, res, next) => {
@@ -192,21 +206,19 @@ const page = (title, body) => `<!doctype html><html lang="hu"><head><meta charse
 // onConfirmed(row): Tamásnak azonnali levél; renderDigest(rows): { subject, html } vagy null
 export function leadFlowRouter({ onConfirmed, renderDigest }) {
   const r = express.Router();
-  r.get("/lead/confirm", (req, res) => {
+  // Egy kattintás: megerősít, majd visszairányít az oldalra (?kfl=<azonosító>), ahol a generálás automatikusan elindul.
+  r.get("/lead/confirm", async (req, res) => {
     const id = String(req.query.id || ""), sig = String(req.query.sig || "");
     res.set("Cache-Control", "no-store");
     if (!sigOk(id, sig)) return res.status(400).send(page("Érvénytelen link", "<h1>Érvénytelen link</h1><p>A megerősítő link hibás vagy lejárt.</p>"));
-    // Szándékosan külön gombnyomás kell: a levélszkennerek is megnyitják a linkeket, de nem nyomnak gombot.
-    res.send(page("Megerősítés", `<h1>Megerősítés</h1><p>Köszönöm! Nyomd meg a gombot, és a weboldal-előnézet generálása elindul.</p><form method="post" action="/api/lead/confirm"><input type="hidden" name="id" value="${id.replace(/[^a-f0-9-]/gi, "")}"><input type="hidden" name="sig" value="${sig.replace(/[^a-f0-9]/gi, "")}"><button>Megerősítem</button></form>`));
-  });
-  r.post("/lead/confirm", express.urlencoded({ extended: false, limit: "2kb" }), async (req, res) => {
-    const id = String(req.body?.id || ""), sig = String(req.body?.sig || "");
-    res.set("Cache-Control", "no-store");
-    if (!sigOk(id, sig)) return res.status(400).send(page("Érvénytelen link", "<h1>Érvénytelen link</h1>"));
+    let info = null;
     try {
       const row = persistent ? await rpc("guard_lead_confirm", { p_id: id }) : null;
       if (row) await onConfirmed(row).catch((e) => console.error("lead confirmed mail error", e.message));
+      info = await leadInfo(id);
     } catch (e) { warnOnce(e); }
+    const back = safeReturnUrl(info?.payload?.returnUrl);
+    if (back) return res.redirect(303, `${back}?kfl=${encodeURIComponent(id)}`);
     res.send(page("Köszönöm", "<h1>Köszönöm, megvan!</h1><p>Térj vissza a generátor oldalára: az előnézet pár másodpercen belül elindul.</p><p><a href=\"https://klementforge.com\">klementforge.com</a></p>"));
   });
   // A kapu ezt kérdezgeti, amíg a látogató meg nem erősíti az e-mailjét (más eszközön is megerősíthet)
@@ -218,7 +230,10 @@ export function leadFlowRouter({ onConfirmed, renderDigest }) {
     if (recent.length >= 600) return res.status(429).json({ error: "rate_limited" });
     if (polls.size > 5000) polls.clear();
     polls.set(ip, [...recent, now]);
-    res.json({ confirmed: await leadConfirmed(req.query.id) });
+    const confirmed = await leadConfirmed(req.query.id);
+    if (!confirmed) return res.json({ confirmed: false });
+    const p = (await leadInfo(req.query.id))?.payload || {};
+    res.json({ confirmed: true, input: { trade: p.trade || "", city: p.city || "", company: p.company || "" } });
   });
   // Napi összesítő: a Supabase pg_cron hívja (x-internal-key fejléccel)
   r.post("/internal/digest", async (req, res) => {
