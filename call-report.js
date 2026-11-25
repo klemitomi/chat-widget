@@ -15,6 +15,7 @@
 //   https://chat-widget-ggyi.onrender.com/api/call-report
 
 import express from "express";
+import { guardLimit } from "./abuse-guard.js";
 
 const router = express.Router();
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -51,9 +52,10 @@ Ami nem hangzott el, legyen null.`,
   return obj;
 }
 
-router.post("/call-report", async (req, res) => {
+router.post("/call-report", guardLimit({ bucket: "callrep", max: Number(process.env.CALL_REPORT_PER_IP_HOUR || 60), windowSec: 3600, immediate: true }), async (req, res) => {
   // Csak a Vapitól fogadunk el jelentést
   const secret = process.env.VAPI_SECRET;
+  if (!secret) console.warn("call-report: VAPI_SECRET nincs beállítva — a végpont nyitott! Állítsd be Renderen.");
   if (secret && req.get("x-vapi-secret") !== secret) return res.status(401).json({ error: "unauthorized" });
 
   const m = req.body?.message || {};

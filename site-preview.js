@@ -25,6 +25,7 @@ import { emailDomainOk } from "./email-check.js";
 import { clip, HU_STYLE } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
 import { createHash } from "node:crypto";
+import { guardLimit, guardDaily, dailyOk, emailPolicy, noteEmail, speedOk, addLead, confirmUrl, sendResend, leadFlowRouter, persistent } from "./abuse-guard.js";
 import { isBlockedText, isBlockedDeep, isJunkLead, isGibberishEmail, isInjectionAttempt, isLegalTell, GUARD_RULE, turnstileOk } from "./content-guard.js";
 
 const router = express.Router();
@@ -35,41 +36,16 @@ export const ICONS = ["tools", "home", "truck", "leaf", "heart", "star", "shield
 export const ACCENTS = ["cyan", "amber", "emerald", "rose", "violet", "orange"];
 export const TEMPLATES = ["ipari", "elegans", "baratsagos"]; // a frontend PreviewStudio TEMPLATES-ével egyezik
 
-// ---- Limitálás (memóriában, függőség nélkül) --------------------------------
-const perIp = new Map();
+// ---- Limitálás (újraindítás-álló, közös abuse-guard modul; Supabase `guard` séma, tartaléka a memória) ----------
 const ipOf = clientIp;
 // Naplózáshoz: az IP rövidített lenyomata (nem az IP maga), hogy látszódjon, egy vagy több látogatótól jön-e a forgalom
 const ipTag = (req) => createHash("sha256").update(String(ipOf(req))).digest("hex").slice(0, 8);
 const capAtThree = (v, fallback = 3) => Math.max(1, Math.min(3, Number(v) || fallback));
 const previewLeadDaily = dailyLimiter(Number(process.env.PREVIEW_LEAD_DAILY_MAX || 30));
-const MAX_FAILS = 20; // elutasított/hibás kérések plafonja IP-nként az ablakban (ezek nem fogyasztják a sikeres keretet)
 // Csak ELLENŐRZ: a keretet a sikeres kérés végén a req.countHit() fogyasztja, a hibásakat a req.countFail() külön számolja.
-// Így egy böngészőhiba vagy elutasított kérés nem zárja ki a valódi látogatót, a próbálgatás viszont korlátozott marad.
-function limitPerIp(max, windowMs, bucket) {
-  return (req, res, next) => {
-    const ip = ipOf(req);
-    const okKey = `${bucket}:${ip}`;
-    const failKey = `${bucket}:fail:${ip}`;
-    const now = Date.now();
-    const recent = (key) => (perIp.get(key) || []).filter((t) => now - t < windowMs);
-    const oks = recent(okKey);
-    const fails = recent(failKey);
-    if (oks.length >= max || fails.length >= MAX_FAILS) return res.status(429).json({ error: "rate_limited" });
-    req.countHit = () => perIp.set(okKey, [...recent(okKey), Date.now()]);
-    req.countFail = () => perIp.set(failKey, [...recent(failKey), Date.now()]);
-    next();
-  };
-}
-setInterval(() => perIp.clear(), 24 * 60 * 60 * 1000).unref();
-
-let daily = { day: new Date().toDateString(), count: 0 };
-function dailyCap(req, res, next) {
-  const today = new Date().toDateString();
-  if (daily.day !== today) daily = { day: today, count: 0 };
-  if (daily.count >= Number(process.env.SITE_PREVIEW_DAILY || 15)) return res.status(429).json({ error: "daily_limit" });
-  daily.count++;
-  next();
-}
+const limitPerIp = (max, windowMs, bucket) => guardLimit({ bucket, max, windowSec: Math.round(windowMs / 1000) });
+const dailyCap = guardDaily("site-preview", Number(process.env.SITE_PREVIEW_DAILY || 15));
+const CONFIRM_MAIL_MAX = Number(process.env.CONFIRM_MAIL_DAILY_MAX || 40);
 
 // ---- Prompt ----------------------------------------------------------------
 function rules(lang) {
@@ -405,7 +381,6 @@ router.post("/site-preview", limitPerIp(capAtThree(process.env.SITE_PREVIEW_PER_
       const { image, gallery } = await findImages(preview);
       console.log(`site-preview ok: "${input.trade}" (${lang}) img=${image ? "yes" : "no"} gallery=${gallery?.length || 0} ip=${ipTag(req)}`);
       req.countHit();
-      flushGateLead(req, preview).catch(() => {});
       res.json({ preview, image, gallery, live: true });
     } catch (e) {
       console.error("site-preview error", e.message, `ip=${ipTag(req)}`);
@@ -490,26 +465,30 @@ ${b.source ? `<p><small>${esc(b.source, 300)}</small></p>` : ""}${b.marketingCon
   if (!r.ok) throw new Error(await r.text());
 }
 
-// A generátor-kapu belépését csak akkor jelezzük Tamásnak, ha a látogató hozzájárult a megkereséshez ÉS tényleg elkészült a vázlata.
-// Addig a kapu adata a memóriában vár (IP szerint, 2 óráig), így a kamu / félbehagyott belépések nem küldenek levelet.
-const pendingGateLeads = new Map();
-function holdGateLead(req, lead) {
-  if (pendingGateLeads.size > 500) pendingGateLeads.clear();
-  pendingGateLeads.set(ipOf(req), { ...lead, at: Date.now() });
+// ---- Generátor-kapu belépők: e-mail megerősítés (double opt-in) + napi összesítő -------------------------
+// Megerősített e-mail -> azonnali levél Tamásnak. Meg nem erősített belépő (és a csak telefonos) -> napi egy összesítő levél.
+async function sendConfirmMail(email, name, id, lang) {
+  const en = lang === "en";
+  await sendResend({
+    from: "Klement Tamás <ai@klementforge.com>",
+    to: email,
+    subject: en ? "Please confirm your e-mail" : "Kérlek, erősítsd meg az e-mail címed",
+    html: en
+      ? `<p>Hi ${esc(name, 60)},</p><p>You tried the website preview tool at klementforge.com. If you would like me to send you one personalised idea, please confirm: <a href="${confirmUrl(id)}">confirm my e-mail</a>.</p><p>If this was not you, just ignore this e-mail — nothing will happen.</p><p>Tamás, KlementForge</p>`
+      : `<p>Szia ${esc(name, 60)}!</p><p>Kipróbáltad a klementforge.com weboldal-előnézet generátorát. Ha szeretnéd, hogy küldjek egy személyre szabott ötletet, kérlek erősítsd meg: <a href="${confirmUrl(id)}">megerősítem az e-mail címem</a>.</p><p>Ha nem te voltál, hagyd figyelmen kívül ezt a levelet — nem történik semmi.</p><p>Tamás, KlementForge</p>`,
+  });
 }
-async function flushGateLead(req, preview) {
-  const key = ipOf(req);
-  const h = pendingGateLeads.get(key);
-  if (!h) return;
-  pendingGateLeads.delete(key);
-  if (Date.now() - h.at > 2 * 60 * 60 * 1000 || !previewLeadDaily()) return;
-  try {
-    await sendLeadMail(h.b, h.name, h.contact, h.isEmail, preview);
-    console.log(`site-preview gate lead emailed after draft ip=${ipTag(req)}`);
-  } catch (e) {
-    console.error("site-preview gate lead mail error", e.message);
-  }
+async function onGateConfirmed(row) {
+  const p = row.payload || {};
+  await sendLeadMail({ ...p, source: `${p.source || ""} — e-mail MEGERŐSÍTVE` }, row.name, row.email, true, {});
+  console.log("site-preview gate lead confirmed and emailed");
 }
+const hu = (d) => new Date(d).toLocaleString("hu-HU", { timeZone: "Europe/Budapest" });
+function renderGateDigest(rows) {
+  const tr = rows.map((r) => { const p = r.payload || {}; return `<tr><td>${esc(r.name, 60)}</td><td>${esc(p.contact || r.email, 80)}</td><td>${esc(p.trade, 80)}${p.city ? `, ${esc(p.city, 40)}` : ""}</td><td>${esc(hu(r.created_at), 40)}</td></tr>`; }).join("");
+  return { subject: `Napi összesítő: ${rows.length} megerősítetlen weboldal-előnézet belépő`, html: `<p>Ők kipróbálták a generátort, hozzájárultak a megkereséshez, de az e-mailjüket nem erősítették meg (vagy csak telefonszámot adtak). Valós érdeklődőt a megerősítésük után azonnal jelzek külön.</p><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><th>Név</th><th>Elérhetőség</th><th>Tevékenység</th><th>Mikor</th></tr>${tr}</table>` };
+}
+router.use(leadFlowRouter({ onConfirmed: onGateConfirmed, renderDigest: renderGateDigest }));
 
 router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (req, res) => {
   const b = req.body || {};
@@ -524,6 +503,11 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     req.countFail();
     return res.status(400).json({ error: "invalid" });
   }
+  if (!speedOk(b.fillMs)) {
+    console.warn(`site-preview lead too fast (${Number(b.fillMs)}ms) ip=${ipTag(req)}`);
+    req.countFail();
+    return res.json({ ok: true }); // robotnak "siker", de nem küldünk semmit
+  }
   if (isEmail && isGibberishEmail(contact)) {
     console.warn(`site-preview lead gibberish email: ${clip(contact, 40)} ip=${ipTag(req)}`); // nem megy e-mail
     req.countFail();
@@ -536,6 +520,14 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
   }
   if (!(await turnstileOk(req))) { req.countFail(); return res.status(403).json({ error: "captcha_failed" }); }
   if (isEmail && !(await emailDomainOk(contact))) { req.countFail(); return res.status(400).json({ error: "invalid_email" }); }
+  if (isEmail) {
+    const why = await emailPolicy(contact);
+    if (why) {
+      console.warn(`site-preview lead email policy: ${why} ip=${ipTag(req)}`);
+      req.countFail();
+      return res.status(why === "disposable" ? 400 : 429).json({ error: why === "disposable" ? "invalid_email" : "rate_limited" });
+    }
+  }
   if (clip(b.trade, 120).trim() && !(await isRealTrade(clip(b.trade, 120).trim()))) {
     console.warn(`site-preview lead not a real trade: "${clip(b.trade, 60)}" ip=${ipTag(req)}`); // nem megy e-mail
     req.countFail();
@@ -545,7 +537,14 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
     if (b.marketingConsent !== true) {
       console.log(`site-preview gate lead without marketing consent: not emailed ip=${ipTag(req)}`);
     } else {
-      holdGateLead(req, { name, contact, isEmail, b: { trade: b.trade, city: b.city, company: b.company, language: b.language, source: b.source, marketingConsent: true } });
+      if (isEmail) await noteEmail(contact);
+      const payload = { trade: clip(b.trade, 120), city: clip(b.city, 60), company: clip(b.company, 60), language: b.language === "en" ? "en" : "hu", source: clip(b.source, 300), marketingConsent: true, contact, isEmail };
+      const id = await addLead({ email: isEmail ? contact : null, name, source: payload.source, payload });
+      // a megerősítő levél idegen címre megy: napi plafon; ha betelt, a belépő a napi összesítőben marad
+      if (id && isEmail && (await dailyOk("confirm-mail", CONFIRM_MAIL_MAX))) {
+        sendConfirmMail(contact, name, id, payload.language).catch((e) => console.error("confirm mail error", e.message));
+      }
+      if (!id) console.warn(`site-preview gate lead not stored (store unavailable) ip=${ipTag(req)}`);
     }
     req.countHit();
     return res.json({ ok: true });
@@ -554,6 +553,7 @@ router.post("/site-preview/lead", limitPerIp(5, 60 * 60 * 1000, "spl"), async (r
 
   try {
     await sendLeadMail(b, name, contact, isEmail, b.preview || {});
+    if (isEmail) await noteEmail(contact);
     req.countHit();
     res.json({ ok: true });
   } catch (e) {

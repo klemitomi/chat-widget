@@ -112,3 +112,19 @@ A `widget.js` fájlt magát is fel kell tölteni az ügyfél tárhelyére (FTP-v
 ## 6. Sablonfájlok helye
 
 A jelen projekt GitHub repója (`chat-widget`) tartalmazza a legfrissebb, működő verziót — ebből érdemes kiindulni minden új ügyfélnél. Ne a legelső verziót másold, hanem mindig a legutóbbi, éles környezetben tesztelt commitot.
+
+## Új végpont védelme (generátor, AI telefonos asszisztens, bármi, ahol a látogató "kattintgathat")
+
+Minden ilyen végpontnál a közös `abuse-guard.js`-t használd — ne írj új, memóriás limitert.
+
+1. **IP-limit, újraindítás-álló:** `guardLimit({ bucket: "nev", max: 3, windowSec: 86400 })` a route elé. Sikernél `req.countHit()`, hibánál `req.countFail()` (vagy `immediate: true`, ha a kérés érkezése is számít).
+2. **Napi plafon az egész szerverre** (költségvédelem): `guardDaily("nev", 300)` middleware, vagy `await dailyOk("nev", 300)`.
+3. **Captcha:** `turnstileOk(req)` (content-guard.js) — a frontend `getTurnstileToken()`-nel küldi a tokent.
+4. **Tartalom:** `isBlockedText`, `isInjectionAttempt`, `isLegalTell`, és a modell promptjába a `GUARD_RULE`. Valós foglalkozás: `isRealTrade`.
+5. **E-mail:** `emailDomainOk` (MX) + `emailPolicy` (eldobható domain, e-mailenkénti/domainenkénti ismétlés) + siker után `noteEmail`.
+6. **Űrlap-sebesség:** a frontend küldje a `fillMs`-t, a backend `speedOk(b.fillMs)`; honeypot (`website` mező).
+7. **Lead-értesítés:** csak megerősített e-mail megy azonnal (`addLead` + `leadFlowRouter`); a többi napi összesítőbe kerül.
+8. **Telefonos asszisztens (Vapi stb.):** a webhook (`/call-report`) legyen titokkal védett (`VAPI_SECRET`), a hívásindító/foglaló végpont pedig az 1–2. pont szerint korlátozott, és a hívó számára is legyen limit (`guardLimit` a telefonszám hash-ére: `count()/hit()` a `h(szám)` kulccsal).
+
+Környezeti változók (Render): `GUARD_SUPABASE_URL`, `GUARD_SUPABASE_KEY` (anon kulcs), `GUARD_SECRET` (a Supabase `guard.config`-ban lévővel egyezzen), `GUARD_HMAC_KEY`, `INTERNAL_KEY`, `PUBLIC_API_URL`. Opcionális: `DISPOSABLE_EXTRA`, `CONFIRM_MAIL_DAILY_MAX`, `DEMO_DAILY_MAX`, `TTS_DAILY_REQ`, `CALL_REPORT_PER_IP_HOUR`.
+Napi összesítő: Supabase pg_cron job `guard-daily-digest` (16:00 UTC) hívja a `/api/internal/digest`-et.

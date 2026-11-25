@@ -12,6 +12,8 @@ import express from "express";
 import { TOOLS, clip } from "./demo-prompts.js";
 import { clientIp, dailyLimiter } from "./client-ip.js";
 import { emailDomainOk } from "./email-check.js";
+import { guardLimit, guardDaily, dailyOk, emailPolicy, noteEmail, speedOk } from "./abuse-guard.js";
+import { isGibberishEmail, isBlockedText, isInjectionAttempt } from "./content-guard.js";
 
 // A felmérés visszaigazoló levele idegen címre megy: napi plafon, hogy ne lehessen spamre használni a domaint
 const confirmDaily = dailyLimiter(Number(process.env.LEAD_CONFIRM_DAILY_MAX || 20));
@@ -20,28 +22,10 @@ const leadDaily = dailyLimiter(Number(process.env.LEAD_DAILY_MAX || 40));
 const router = express.Router();
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
-// Egyszerű, függőség nélküli limitálás IP-nként + napi plafon (költségvédelem)
-const hits = new Map();
-function limit(max, windowMs) {
-  return (req, res, next) => {
-    const key = `${max}:${clientIp(req)}`;
-    const now = Date.now();
-    const list = (hits.get(key) || []).filter((t) => now - t < windowMs);
-    if (list.length >= max) return res.status(429).json({ error: "rate_limited" });
-    list.push(now);
-    hits.set(key, list);
-    next();
-  };
-}
-setInterval(() => hits.clear(), 6 * 60 * 60 * 1000).unref();
-
-let daily = { day: new Date().toDateString(), count: 0 };
-function dailyCap(req, res, next) {
-  const today = new Date().toDateString();
-  if (daily.day !== today) daily = { day: today, count: 0 };
-  if (++daily.count > 300) return res.status(429).json({ error: "daily_limit" });
-  next();
-}
+// Közös, újraindítás-álló limitálás (abuse-guard.js): IP-nként, a kérés beérkezésekor számol
+const limit = (max, windowMs, bucket) => guardLimit({ bucket, max, windowSec: Math.round(windowMs / 1000), immediate: true });
+const dailyCap = guardDaily("demo", Number(process.env.DEMO_DAILY_MAX || 300));
+const ttsDailyReq = guardDaily("tts", Number(process.env.TTS_DAILY_REQ || 400));
 
 function parseJson(text) {
   const t = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
@@ -51,7 +35,7 @@ function parseJson(text) {
   throw new Error("bad_json");
 }
 
-router.post("/demo", limit(20, 10 * 60 * 1000), dailyCap, async (req, res) => {
+router.post("/demo", limit(20, 10 * 60 * 1000, "demo"), dailyCap, async (req, res) => {
   const tool = TOOLS[req.body?.tool];
   if (!tool) return res.status(400).json({ error: "unknown_tool" });
   try {
@@ -95,11 +79,16 @@ async function sendMail(payload) {
   if (!r.ok) throw new Error(await r.text());
 }
 
-router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
+router.post("/lead", limit(5, 60 * 60 * 1000, "dlead"), async (req, res) => {
   const b = req.body || {};
   const email = clip(b.email, 120);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || b.consent !== true) return res.status(400).json({ error: "invalid" });
+  if (b.website) return res.json({ ok: true }); // honeypot
+  if (!speedOk(b.fillMs)) return res.json({ ok: true }); // túl gyorsan kitöltve: robot
+  if (isGibberishEmail(email) || isBlockedText(b.name, b.company) || isInjectionAttempt(b.name, b.company)) return res.status(400).json({ error: "invalid" });
   if (!(await emailDomainOk(email))) return res.status(400).json({ error: "invalid_email" });
+  const why = await emailPolicy(email);
+  if (why) return res.status(why === "disposable" ? 400 : 429).json({ error: why === "disposable" ? "invalid_email" : "rate_limited" });
   if (!leadDaily()) return res.status(429).json({ error: "daily_limit" });
   const hours = Math.max(0, Math.min(999, Math.round(Number(b.estimateHours) || 0)));
   const answers = Object.entries(b.answers || {}).slice(0, 10).map(([q, a]) => `<li>${esc(q)}<br><b>${esc(a)}</b></li>`).join("");
@@ -119,6 +108,7 @@ router.post("/lead", limit(5, 60 * 60 * 1000), async (req, res) => {
       subject: "Megkaptam az AI-felmérésed",
       html: `<p>Szia ${esc(b.name)}!</p><p>Köszönöm, hogy kitöltötted a felmérést. A becslés szerint kb. <b>${hours} óra</b> rutinmunkát vehetne le rólad havonta az AI, leginkább itt: ${recs}.</p><p>Két munkanapon belül küldöm a személyre szabott tervet, konkrét lépésekkel és árakkal. Ha addig kérdésed van, válaszolj erre a levélre.</p><p>Tamás<br>KlementForge</p>`,
     });
+    await noteEmail(email);
     res.json({ ok: true });
   } catch (e) {
     console.error("lead error", e.message);
@@ -176,7 +166,7 @@ function ttsProvider() {
   return null;
 }
 
-router.post("/tts", limit(40, 10 * 60 * 1000), async (req, res) => {
+router.post("/tts", limit(40, 10 * 60 * 1000, "tts"), ttsDailyReq, async (req, res) => {
   const provider = ttsProvider();
   if (!provider) return res.status(503).json({ error: "tts_disabled" });
   const text = clip(req.body?.text, 400).trim();
